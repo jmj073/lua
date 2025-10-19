@@ -12,6 +12,7 @@
 
 #include <limits.h>
 #include <string.h>
+#include <stdio.h>
 
 #include "lua.h"
 
@@ -1022,7 +1023,7 @@ static int maxtostore (FuncState *fs) {
 
 
 static void constructor (LexState *ls, expdesc *t) {
-  /* constructor -> '{' [ field { sep field } [sep] ] '}'
+  /* constructor -> '{|' [ field { sep field } [sep] ] '|}'
      sep -> ',' | ';' */
   FuncState *fs = ls->fs;
   int line = ls->linenumber;
@@ -1034,17 +1035,17 @@ static void constructor (LexState *ls, expdesc *t) {
   init_exp(t, VNONRELOC, fs->freereg);  /* table will be at stack top */
   luaK_reserveregs(fs, 1);
   init_exp(&cc.v, VVOID, 0);  /* no value (yet) */
-  checknext(ls, '{' /*}*/);
+  checknext(ls, TK_TBS);
   cc.maxtostore = maxtostore(fs);
   do {
-    if (ls->t.token == /*{*/ '}') break;
+    if (ls->t.token == TK_TBE) break;
     if (cc.v.k != VVOID)  /* is there a previous list item? */
       closelistfield(fs, &cc);  /* close it */
     field(ls, &cc);
     luaY_checklimit(fs, cc.tostore + cc.na + cc.nh, MAX_CNST,
                     "items in a constructor");
   } while (testnext(ls, ',') || testnext(ls, ';'));
-  check_match(ls, /*{*/ '}', '{' /*}*/, line);
+  check_match(ls, TK_TBE, TK_TBS, line);
   lastlistfield(fs, &cc);
   luaK_settablesize(fs, pc, t->u.info, cc.na, cc.nh);
 }
@@ -1152,7 +1153,7 @@ static void funcargs (LexState *ls, expdesc *f) {
       check_match(ls, ')', '(', line);
       break;
     }
-    case '{' /*}*/: {  /* funcargs -> constructor */
+    case TK_TBS: {  /* funcargs -> constructor */
       constructor(ls, &args);
       break;
     }
@@ -1239,7 +1240,7 @@ static void suffixedexp (LexState *ls, expdesc *v) {
         funcargs(ls, v);
         break;
       }
-      case '(': case TK_STRING: case '{' /*}*/: {  /* funcargs */
+      case '(': case TK_STRING: case TK_TBS: {  /* funcargs */
         luaK_exp2nextreg(fs, v);
         funcargs(ls, v);
         break;
@@ -1287,7 +1288,7 @@ static void simpleexp (LexState *ls, expdesc *v) {
       init_exp(v, VVARARG, luaK_codeABC(fs, OP_VARARG, 0, 0, 1));
       break;
     }
-    case '{' /*}*/: {  /* constructor */
+    case TK_TBS: {  /* constructor */
       constructor(ls, v);
       return;
     }
@@ -2010,7 +2011,7 @@ static void statement (LexState *ls) {
       break;
     }
     case '{': {  /* stat -> '{' block '}' */
-      luaX_next(ls);  /* skip DO */
+      luaX_next(ls);  /* skip '{' */
       block(ls);
       check_match(ls, '}', '{', line);
       break;

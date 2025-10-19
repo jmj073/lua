@@ -47,7 +47,8 @@ static const char *const luaX_tokens [] = {
     "false", "for", "fn", "global", "goto", "if",
     "in", "local", "nil", "not", "or",
     "return", "true", "while",
-    "//", "..", "...", "==", ">=", "<=", "~=",
+    "//", "..", "...", "==", ">=", "<=", "!=",
+    "{|", "|}",
     "<<", ">>", "::", "<eof>",
     "<number>", "<integer>", "<name>", "<string>"
 };
@@ -504,6 +505,16 @@ static int llex (LexState *ls, SemInfo *seminfo) {
         else if (sep == 0)  /* '[=...' missing second bracket? */
           lexerror(ls, "invalid long string delimiter", TK_STRING);
         return '[';
+      }
+      case '{': {
+        next(ls);
+        if (check_next1(ls, '|')) return TK_TBS;  /* '{|' */
+        else return '{';
+      }
+      case '|': {
+        next(ls);
+        if (check_next1(ls, '}')) return TK_TBE;  /* '|}' */
+        else return '|';
       }
       case '=': {
         next(ls);
