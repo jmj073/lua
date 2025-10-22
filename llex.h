@@ -31,10 +31,10 @@
 */
 enum RESERVED {
   /* terminal symbols denoted by reserved words */
-  TK_AND = FIRST_RESERVED, TK_BREAK,
-  TK_ELSE, TK_ELSEIF, TK_FALSE, TK_FOR, TK_FUNCTION,
+  TK_AND = FIRST_RESERVED,
+  TK_ELSE, TK_ELSEIF, TK_FALSE, TK_FUNCTION,
   TK_GLOBAL, TK_GOTO, TK_IF, TK_IN, TK_LOCAL, TK_NIL, TK_NOT, TK_OR,
-  TK_RETURN, TK_TRUE, TK_WHILE,
+  TK_RETURN, TK_TRUE,
   /* other terminal symbols */
   TK_IDIV, TK_CONCAT, TK_DOTS, TK_EQ, TK_GE, TK_LE, TK_NE,
   TK_TBS, TK_TBE,
@@ -44,7 +44,7 @@ enum RESERVED {
 };
 
 /* number of reserved words */
-#define NUM_RESERVED	(cast_int(TK_WHILE-FIRST_RESERVED + 1))
+#define NUM_RESERVED	(cast_int(TK_TRUE-FIRST_RESERVED + 1))
 
 
 typedef union {

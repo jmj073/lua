@@ -6,13 +6,9 @@
 		 varlist ‘=’ explist | 
 		 functioncall | 
 		 label | 
-		 break | 
 		 goto Name | 
 		 '{' block '}' | 
-		 while exp '{' block '}' | 
 		 if exp '{' block '}' {elseif exp '{' block '}'} [else '{' block '}'] | 
-		 for Name ‘=’ exp ‘,’ exp [‘,’ exp] '{' block '}' | 
-		 for namelist in explist '{' block '}' | 
 		 fn funcname funcbody | 
 		 local fn Name funcbody | 
 		 local attnamelist [‘=’ explist] 
