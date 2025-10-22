@@ -1,0 +1,66 @@
+	chunk ::= block
+
+	block ::= {stat} [retstat]
+
+	stat ::=  ‘;’ | 
+		 varlist ‘=’ explist | 
+		 functioncall | 
+		 label | 
+		 break | 
+		 goto Name | 
+		 '{' block '}' | 
+		 while exp '{' block '}' | 
+		 if exp '{' block '}' {elseif exp '{' block '}'} [else '{' block '}'] | 
+		 for Name ‘=’ exp ‘,’ exp [‘,’ exp] '{' block '}' | 
+		 for namelist in explist '{' block '}' | 
+		 fn funcname funcbody | 
+		 local fn Name funcbody | 
+		 local attnamelist [‘=’ explist] 
+
+	attnamelist ::=  Name attrib {‘,’ Name attrib}
+
+	attrib ::= [‘<’ Name ‘>’]
+
+	retstat ::= return [explist] [‘;’]
+
+	label ::= ‘::’ Name ‘::’
+
+	funcname ::= Name {‘.’ Name} [‘:’ Name]
+
+	varlist ::= var {‘,’ var}
+
+	var ::=  Name | prefixexp ‘[’ exp ‘]’ | prefixexp ‘.’ Name 
+
+	namelist ::= Name {‘,’ Name}
+
+	explist ::= exp {‘,’ exp}
+
+	exp ::=  nil | false | true | Numeral | LiteralString | ‘...’ | functiondef | 
+		 prefixexp | tableconstructor | exp binop exp | unop exp 
+
+	prefixexp ::= var | functioncall | ‘(’ exp ‘)’
+
+	functioncall ::=  prefixexp args | prefixexp ‘:’ Name args 
+
+	args ::=  ‘(’ [explist] ‘)’ | tableconstructor | LiteralString 
+
+	functiondef ::= fn funcbody
+
+	funcbody ::= ‘(’ [parlist] ‘)’ '{' block '}'
+
+	parlist ::= namelist [‘,’ ‘...’] | ‘...’
+
+	tableconstructor ::= ‘{’ [fieldlist] ‘}’
+
+	fieldlist ::= field {fieldsep field} [fieldsep]
+
+	field ::= ‘[’ exp ‘]’ ‘=’ exp | Name ‘=’ exp | exp
+
+	fieldsep ::= ‘,’ | ‘;’
+
+	binop ::=  ‘+’ | ‘-’ | ‘*’ | ‘/’ | ‘//’ | ‘^’ | ‘%’ | 
+		 ‘&’ | ‘~’ | ‘|’ | ‘>>’ | ‘<<’ | ‘..’ | 
+		 ‘<’ | ‘<=’ | ‘>’ | ‘>=’ | ‘==’ | ‘!=’ | 
+		 and | or
+
+	unop ::= ‘-’ | not | ‘#’ | ‘~’
