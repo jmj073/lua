@@ -12,6 +12,14 @@
 #include "lobject.h"
 #include "lstate.h"
 #include "lzio.h"
+#include <setjmp.h>
+
+/* Long jump node (now public so libraries can allocate one) */
+typedef struct lua_longjmp {
+  struct lua_longjmp *previous;
+  jmp_buf b;
+  volatile TStatus status;  /* error code */
+} lua_longjmp;
 
 
 /*
@@ -94,5 +102,14 @@ LUAI_FUNC l_noret luaD_throw (lua_State *L, TStatus errcode);
 LUAI_FUNC l_noret luaD_throwbaselevel (lua_State *L, TStatus errcode);
 LUAI_FUNC TStatus luaD_rawrunprotected (lua_State *L, Pfunc f, void *ud);
 
-#endif
+/*
+** Jump control APIs to run a protected section with a specific jump target
+** and to long-jump to that target. These reuse Lua's internal error
+** handling mechanics for non-error control transfers (e.g., escape cont.).
+*/
+LUAI_FUNC void luaD_setjump (lua_State *L, lua_longjmp *lj);
+LUAI_FUNC void luaD_unsetjump (lua_State *L, lua_longjmp *lj);
+LUAI_FUNC l_noret luaD_longjump (lua_State *L, lua_longjmp *target, TStatus status);
+LUAI_FUNC TStatus luaD_runwithjump (lua_State *L, lua_longjmp *lj, Pfunc f, void *ud);
 
+#endif

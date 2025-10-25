@@ -14,24 +14,89 @@
 #include "lauxlib.h"
 #include "lualib.h"
 #include "llimits.h"
+#include "ldo.h"
 
-static int luaB_callcc(lua_State *L) {
-  int n = lua_gettop(L);  /* number of arguments */
+static int luaB_callec(lua_State *L); /* forward */
+
+static int luaB_callcc(lua_State *L) { return luaB_callec(L); }
+
+static int k_escape(lua_State *L) {
+  lua_longjmp *lj = (lua_longjmp *)lua_touserdata(L, lua_upvalueindex(1));
+  /* Pack arguments into a table and stash in registry under key 'lj' */
+  int n = lua_gettop(L);
   int i;
-  for (i = 1; i <= n; i++) {  /* for each argument */
-    size_t l;
-    const char *s = luaL_tolstring(L, i, &l);  /* convert it to string */
-    if (i > 1)  /* not the first element? */
-      lua_writestring("\t", 1);  /* add a tab before it */
-    lua_writestring(s, l);  /* print it */
-    lua_pop(L, 1);  /* pop result */
+  lua_createtable(L, n, 0);
+  {
+    int t = lua_absindex(L, -1);
+    luaL_checktype(L, t, LUA_TTABLE);
+    for (i = 1; i <= n; i++) {
+      lua_pushvalue(L, i);
+      lua_rawseti(L, t, i);
+    }
+    /* registry[lj] = table */
+    lua_pushlightuserdata(L, lj);       /* key */
+    lua_pushvalue(L, t);                /* value = table */
+    lua_settable(L, LUA_REGISTRYINDEX);
   }
-  lua_writeline();
-  return 0;
+  lua_pop(L, 1); /* pop local table */
+  /* Jump back to callec's protected runner using an error status so VM unwinds */
+  luaD_longjump(L, lj, LUA_ERRRUN);
+  return 0; /* unreachable */
+}
+
+static void callec_runner(lua_State *L, void *ud) {
+  lua_longjmp *lj = (lua_longjmp *)ud;
+  /* arg 1 must be a function */
+  luaL_checktype(L, 1, LUA_TFUNCTION);
+  /* push escape closure as single argument */
+  lua_pushlightuserdata(L, lj);
+  lua_pushcclosure(L, k_escape, 1); /* escape */
+  /* call func(escape) with multiple returns */
+  lua_call(L, 1, LUA_MULTRET);
+}
+
+static int luaB_callec(lua_State *L) {
+  lua_longjmp lj;
+  int base = lua_gettop(L);
+  TStatus st = luaD_runwithjump(L, &lj, callec_runner, &lj);
+  /* After run: either normal return (st==LUA_OK) or escaped via longjump (st!=LUA_OK) */
+  /* Check if escaped: registry[lj] holds a table of results */
+  lua_pushlightuserdata(L, &lj);
+  lua_gettable(L, LUA_REGISTRYINDEX);
+  if (lua_istable(L, -1)) {
+    /* escape path: keep table, compute len, then move table just above base */
+    lua_Unsigned len = lua_rawlen(L, -1);
+    /* clear registry entry now */
+    lua_pushlightuserdata(L, &lj);
+    lua_pushnil(L);
+    lua_settable(L, LUA_REGISTRYINDEX);
+    /* move table to position base+1 and drop anything above */
+    lua_insert(L, base + 1);  /* table to base+1 */
+    lua_settop(L, base + 1);  /* stack: ... table */
+    {
+      lua_Integer i;
+      for (i = 1; i <= (lua_Integer)len; i++) {
+        lua_rawgeti(L, base + 1, i);
+      }
+    }
+    /* remove the table, leaving only the pushed values */
+    lua_remove(L, base + 1);
+    return (int)len;
+  } else {
+    /* no escape: pop lookup result */
+    lua_pop(L, 1);
+    if (st != LUA_OK) {
+      /* real error */
+      return lua_error(L);
+    }
+    /* normal return from function: results left on stack by lua_call */
+    return lua_gettop(L); /* stack now contains exactly the results */
+  }
 }
 
 static const luaL_Reg cont_funcs[] = {
-  {"print", luaB_callcc},
+  {"callcc", luaB_callcc},
+  {"callec", luaB_callec},
   {NULL, NULL}
 };
 

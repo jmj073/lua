@@ -57,12 +57,7 @@
 ** =======================================================
 */
 
-/* chained list of long jump buffers */
-typedef struct lua_longjmp {
-  struct lua_longjmp *previous;
-  jmp_buf b;
-  volatile TStatus status;  /* error code */
-} lua_longjmp;
+/* chained list of long jump buffers: now defined publicly in ldo.h */
 
 
 /*
@@ -124,8 +119,7 @@ void luaD_seterrorobj (lua_State *L, TStatus errcode, StkId oldtop) {
 
 l_noret luaD_throw (lua_State *L, TStatus errcode) {
   if (L->errorJmp) {  /* thread has an error handler? */
-    L->errorJmp->status = errcode;  /* set status */
-    LUAI_THROW(L, L->errorJmp);  /* jump to it */
+    luaD_longjump(L, L->errorJmp, errcode);  /* jump to it */
   }
   else {  /* thread has no error handler */
     global_State *g = G(L);
@@ -167,6 +161,33 @@ TStatus luaD_rawrunprotected (lua_State *L, Pfunc f, void *ud) {
   L->errorJmp = lj.previous;  /* restore old error handler */
   L->nCcalls = oldnCcalls;
   return lj.status;
+}
+
+/*
+** Public jump-control helpers
+*/
+void luaD_setjump (lua_State *L, lua_longjmp *lj) {
+  lj->status = LUA_OK;
+  lj->previous = L->errorJmp;
+  L->errorJmp = lj;
+}
+
+void luaD_unsetjump (lua_State *L, lua_longjmp *lj) {
+  L->errorJmp = lj->previous;
+}
+
+l_noret luaD_longjump (lua_State *L, lua_longjmp *target, TStatus status) {
+  target->status = status;
+  LUAI_THROW(L, target);
+}
+
+TStatus luaD_runwithjump (lua_State *L, lua_longjmp *lj, Pfunc f, void *ud) {
+  l_uint32 oldnCcalls = L->nCcalls;
+  luaD_setjump(L, lj);
+  LUAI_TRY(L, lj, f, ud);
+  luaD_unsetjump(L, lj);
+  L->nCcalls = oldnCcalls;
+  return lj->status;
 }
 
 /* }====================================================== */

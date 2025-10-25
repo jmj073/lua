@@ -19,3 +19,9 @@ fn foreach(f, ls) {
 a = cons(1, cons(2, cons(3, nil)))
 
 foreach(print, a)
+
+fn foo(k) {
+  k(4)
+}
+
+print(continuation.callec(fn (k) { foo(k) }))
