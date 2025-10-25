@@ -1,0 +1,8 @@
+---
+trigger: always_on
+---
+
+lua가 `end` 토큰 대신 중괄호(`{}`)를 사용하도록 변경함.
+`function` 토큰을 `fn`으로 바꿈.
+`~=` 대신 `!=`을 쓰도록 바꿈
+while과 for 문을 제거함

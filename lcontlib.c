@@ -22,6 +22,20 @@ static int luaB_callcc(lua_State *L) { return luaB_callec(L); }
 
 static int k_escape(lua_State *L) {
   lua_longjmp *lj = (lua_longjmp *)lua_touserdata(L, lua_upvalueindex(1));
+  lua_State *origin_L = (lua_State *)lua_touserdata(L, lua_upvalueindex(2));
+  /* Check if we're trying to escape across coroutine boundaries */
+  if (L != origin_L) {
+    return luaL_error(L, "cannot escape across coroutine boundaries");
+  }
+  /* Check if the escape continuation is still valid */
+  /* Use lj+1 as key for validity flag to avoid collision with result table */
+  lua_pushlightuserdata(L, (void*)((char*)lj + 1));
+  lua_rawget(L, LUA_REGISTRYINDEX);
+  if (!lua_toboolean(L, -1)) {
+    lua_pop(L, 1);
+    return luaL_error(L, "escape continuation is no longer valid");
+  }
+  lua_pop(L, 1);
   /* Pack arguments into a table and stash in registry under key 'lj' */
   int n = lua_gettop(L);
   int i;
@@ -48,9 +62,15 @@ static void callec_runner(lua_State *L, void *ud) {
   lua_longjmp *lj = (lua_longjmp *)ud;
   /* arg 1 must be a function */
   luaL_checktype(L, 1, LUA_TFUNCTION);
-  /* push escape closure as single argument */
+  /* Mark this escape continuation as valid in registry */
+  /* Use lj+1 as key for validity flag to avoid collision with result table */
+  lua_pushlightuserdata(L, (void*)((char*)lj + 1));
+  lua_pushboolean(L, 1);
+  lua_rawset(L, LUA_REGISTRYINDEX);
+  /* push escape closure as single argument with 2 upvalues: lj and L */
   lua_pushlightuserdata(L, lj);
-  lua_pushcclosure(L, k_escape, 1); /* escape */
+  lua_pushlightuserdata(L, L);
+  lua_pushcclosure(L, k_escape, 2); /* escape */
   /* call func(escape) with multiple returns */
   lua_call(L, 1, LUA_MULTRET);
 }
@@ -59,6 +79,10 @@ static int luaB_callec(lua_State *L) {
   lua_longjmp lj;
   int base = lua_gettop(L);
   TStatus st = luaD_runwithjump(L, &lj, callec_runner, &lj);
+  /* Invalidate the escape continuation */
+  lua_pushlightuserdata(L, (void*)((char*)&lj + 1));
+  lua_pushnil(L);
+  lua_rawset(L, LUA_REGISTRYINDEX);
   /* After run: either normal return (st==LUA_OK) or escaped via longjump (st!=LUA_OK) */
   /* Check if escaped: registry[lj] holds a table of results */
   lua_pushlightuserdata(L, &lj);
