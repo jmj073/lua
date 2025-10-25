@@ -13,7 +13,7 @@ fn cdr(pair) {
 fn foreach(f, ls) {
   if (ls == nil) { return }
   f(car(ls))
-  foreach(f, cdr(ls))
+  return foreach(f, cdr(ls))
 }
 
 a = cons(1, cons(2, cons(3, nil)))
