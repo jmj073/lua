@@ -17,7 +17,7 @@ local ok2, result2 = pcall(fn () {
 })
 print("ok2:", ok2, "result2:", result2)
 assert(ok2 == false)
-assert(string.find(result2, "test error") ~= nil)
+assert(string.find(result2, "test error") != nil)
 
 print("\nTest 3: 중첩된 pcall과 callec")
 local ok3, result3 = pcall(fn () {
@@ -41,7 +41,7 @@ local ok4, result4 = pcall(fn () {
 })
 print("ok4:", ok4, "result4:", result4)
 assert(ok4 == false)
-assert(string.find(result4, "error after callec") ~= nil)
+assert(string.find(result4, "error after callec") != nil)
 
 print("\nTest 5: callec 안에서 pcall 사용, pcall 안에서 escape 호출")
 local result5 = continuation.callec(fn (escape) {
@@ -68,7 +68,7 @@ local result6 = continuation.callec(fn (escape) {
   return "unexpected success"
 })
 print("result6:", result6)
-assert(string.find(result6, "pcall caught error") ~= nil)
-assert(string.find(result6, "normal error in pcall") ~= nil)
+assert(string.find(result6, "pcall caught error") != nil)
+assert(string.find(result6, "normal error in pcall") != nil)
 
 print("\n모든 테스트 통과!")
