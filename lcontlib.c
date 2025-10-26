@@ -21,6 +21,12 @@
 
 static int luaB_callec(lua_State *L); /* forward */
 
+/* Export cont_call pointer for VM to detect continuation invocations */
+int cont_call(lua_State *L);  /* forward declaration */
+lua_CFunction luaCont_getcallfunc (void) {
+  return cont_call;
+}
+
 static int k_escape(lua_State *L) {
   lua_longjmp *lj = (lua_longjmp *)lua_touserdata(L, lua_upvalueindex(1));
   lua_State *origin_L = (lua_State *)lua_touserdata(L, lua_upvalueindex(2));
@@ -127,7 +133,7 @@ static int luaB_callec(lua_State *L) {
 ** This directly invokes the continuation by restoring the saved context
 ** and resuming execution from the saved PC.
 */
-static int cont_call(lua_State *L) {
+int cont_call(lua_State *L) {
   Continuation *cont;
   int nargs = lua_gettop(L);
   

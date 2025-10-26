@@ -19,6 +19,7 @@
 #include "lua.h"
 
 #include "lapi.h"
+#include "lcont.h"
 #include "ldebug.h"
 #include "ldo.h"
 #include "lfunc.h"
@@ -1182,6 +1183,57 @@ void luaV_finishOp (lua_State *L) {
 #define vmbreak		break
 
 
+/*
+** Inject execution context from source thread to target thread
+** This is the key function for continuation support
+** After injection, target thread will continue execution in source's context
+*/
+void luaV_injectcontext (lua_State *L, lua_State *source) {
+  CallInfo *L_ci = L->ci;
+  CallInfo *src_ci = source->ci;
+  StkId dest;
+  int src_size;
+  int i;
+  
+  fprintf(stderr, "[VM] luaV_injectcontext: injecting context from %p to %p\n",
+          (void*)source, (void*)L);
+  
+  /* Phase 1: Stack injection - copy source's stack to current position */
+  dest = L_ci->func.p;
+  src_size = cast_int(src_ci->top.p - src_ci->func.p);
+  
+  fprintf(stderr, "[VM]   copying %d stack slots from source\n", src_size);
+  
+  /* Ensure we have enough space */
+  luaD_checkstack(L, src_size + LUA_MINSTACK);
+  
+  /* Copy entire stack frame from source */
+  for (i = 0; i < src_size; i++) {
+    setobj2s(L, dest + i, s2v(src_ci->func.p + i));
+  }
+  
+  /* Phase 2: CallInfo transformation - convert to Lua frame */
+  fprintf(stderr, "[VM]   transforming CallInfo to Lua frame\n");
+  
+  /* Remove C function flag, mark as Lua */
+  L_ci->callstatus = src_ci->callstatus & ~CIST_C;
+  
+  /* Copy Lua execution state */
+  L_ci->u.l.savedpc = src_ci->u.l.savedpc;
+  L_ci->u.l.trap = 0;
+  L_ci->u.l.nextraargs = 0;
+  
+  /* Update stack pointers */
+  L_ci->func.p = dest;
+  L_ci->top.p = dest + src_size;
+  L->top.p = L_ci->top.p;
+  
+  fprintf(stderr, "[VM]   context injected successfully\n");
+  fprintf(stderr, "[VM]   new PC=%p, func=%p, top=%p\n",
+          (void*)L_ci->u.l.savedpc, (void*)L_ci->func.p, (void*)L->top.p);
+}
+
+
 void luaV_execute (lua_State *L, CallInfo *ci) {
   LClosure *cl;
   TValue *k;
@@ -1713,6 +1765,18 @@ void luaV_execute (lua_State *L, CallInfo *ci) {
           L->top.p = ra + b;  /* top signals number of arguments */
         /* else previous instruction set top */
         savepc(ci);  /* in case of errors */
+        
+        /* ⭐ CHECK: Is this a continuation invocation? */
+        if (luaCont_iscontinvoke(s2v(ra))) {
+          /* Special handling: direct continuation invoke */
+          luaCont_doinvoke(L, ra, nresults);
+          /* CRITICAL: Reload PC and continue from new location */
+          updatebase(ci);  /* Update base pointer */
+          pc = ci->u.l.savedpc;  /* Reload PC from ci */
+          updatetrap(ci);
+          goto startfunc;  /* Restart execution from new PC */
+        }
+        
         if ((newci = luaD_precall(L, ra, nresults)) == NULL)
           updatetrap(ci);  /* C call; nothing else to be done */
         else {  /* Lua call: run function in this same C frame */
