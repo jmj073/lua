@@ -400,6 +400,7 @@ union GCUnion {
   struct Proto p;
   struct lua_State th;  /* thread */
   struct UpVal upv;
+  struct Continuation cont;
 };
 
 
@@ -422,6 +423,7 @@ union GCUnion {
 #define gco2p(o)  check_exp((o)->tt == LUA_VPROTO, &((cast_u(o))->p))
 #define gco2th(o)  check_exp((o)->tt == LUA_VTHREAD, &((cast_u(o))->th))
 #define gco2upv(o)	check_exp((o)->tt == LUA_VUPVAL, &((cast_u(o))->upv))
+#define gco2cont(o)  check_exp((o)->tt == LUA_VCONT, &((cast_u(o))->cont))
 
 
 /*

@@ -21,14 +21,15 @@
 */
 #define LUA_TUPVAL	LUA_NUMTYPES  /* upvalues */
 #define LUA_TPROTO	(LUA_NUMTYPES+1)  /* function prototypes */
-#define LUA_TDEADKEY	(LUA_NUMTYPES+2)  /* removed keys in tables */
+#define LUA_TCONT	(LUA_NUMTYPES+2)  /* continuations */
+#define LUA_TDEADKEY	(LUA_NUMTYPES+3)  /* removed keys in tables */
 
 
 
 /*
 ** number of all possible types (including LUA_TNONE but excluding DEADKEY)
 */
-#define LUA_TOTALTYPES		(LUA_TPROTO + 2)
+#define LUA_TOTALTYPES		(LUA_TCONT + 2)
 
 
 /*
@@ -710,6 +711,48 @@ typedef union Closure {
 
 
 #define getproto(o)	(clLvalue(o)->p)
+
+/* }================================================================== */
+
+
+/*
+** {==================================================================
+** Continuations
+** ===================================================================
+*/
+
+#define LUA_VCONT	makevariant(LUA_TCONT, 0)
+
+#define ttiscont(o)		checktag((o), ctb(LUA_VCONT))
+
+#define contvalue(o)	check_exp(ttiscont(o), gco2cont(val_(o).gc))
+
+#define setcontvalue(L,obj,x) \
+  { TValue *io = (obj); Continuation *x_ = (x); \
+    val_(io).gc = obj2gco(x_); settt_(io, ctb(LUA_VCONT)); \
+    checkliveness(L,io); }
+
+
+/*
+** Continuation structure: captures the CALLER context of callcc
+** 
+** Phase 2: True first-class continuation
+** Captures the continuation AFTER callcc call, not inside the function
+** 
+** When continuation is invoked, execution resumes from the point
+** immediately after the callcc call in the caller function.
+*/
+typedef struct Continuation {
+  CommonHeader;
+  lua_State *L;                  /* original thread (for validation) */
+  
+  /* Coroutine-based implementation */
+  lua_State *thread;             /* Continuation thread (snapshot) */
+  int ref;                       /* Registry reference (GC anchor) */
+  
+  /* GC */
+  GCObject *gclist;              /* for GC traversal */
+} Continuation;
 
 /* }================================================================== */
 

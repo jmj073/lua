@@ -11,9 +11,9 @@
 
 #include <string.h>
 
-
 #include "lua.h"
-
+#include "lapi.h"
+#include "lcont.h"
 #include "ldebug.h"
 #include "ldo.h"
 #include "lfunc.h"
@@ -154,7 +154,11 @@ static l_mem objsize (GCObject *o) {
       res = sizeof(UpVal);
       break;
     }
-    default: res = 0; lua_assert(0);
+    case LUA_VCONT: {
+      res = sizeof(Continuation);
+      break;
+    }
+    default: lua_assert(0); res = 0;
   }
   return cast(l_mem, res);
 }
@@ -167,6 +171,7 @@ static GCObject **getgclist (GCObject *o) {
     case LUA_VCCL: return &gco2ccl(o)->gclist;
     case LUA_VTHREAD: return &gco2th(o)->gclist;
     case LUA_VPROTO: return &gco2p(o)->gclist;
+    case LUA_VCONT: return &gco2cont(o)->gclist;
     case LUA_VUSERDATA: {
       Udata *u = gco2u(o);
       lua_assert(u->nuvalue > 0);
@@ -721,6 +726,18 @@ static l_mem traversethread (global_State *g, lua_State *th) {
 
 
 /*
+** Traverse a continuation object marking all referenced objects
+*/
+static l_mem traversecont (global_State *g, Continuation *cont) {
+  /* Mark the continuation thread */
+  if (cont->thread) {
+    markobject(g, cont->thread);
+  }
+  return sizeof(Continuation);
+}
+
+
+/*
 ** traverse one gray object, turning it to black. Return an estimate
 ** of the number of slots traversed.
 */
@@ -735,6 +752,7 @@ static l_mem propagatemark (global_State *g) {
     case LUA_VCCL: return traverseCclosure(g, gco2ccl(o));
     case LUA_VPROTO: return traverseproto(g, gco2p(o));
     case LUA_VTHREAD: return traversethread(g, gco2th(o));
+    case LUA_VCONT: return traversecont(g, gco2cont(o));
     default: lua_assert(0); return 0;
   }
 }
@@ -857,6 +875,9 @@ static void freeobj (lua_State *L, GCObject *o) {
       break;
     case LUA_VTHREAD:
       luaE_freethread(L, gco2th(o));
+      break;
+    case LUA_VCONT:
+      luaCont_free(L, gco2cont(o));
       break;
     case LUA_VUSERDATA: {
       Udata *u = gco2u(o);

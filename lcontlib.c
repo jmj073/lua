@@ -15,10 +15,11 @@
 #include "lualib.h"
 #include "llimits.h"
 #include "ldo.h"
+#include "lcont.h"
+#include "lobject.h"
+#include "lstate.h"
 
 static int luaB_callec(lua_State *L); /* forward */
-
-static int luaB_callcc(lua_State *L) { return luaB_callec(L); }
 
 static int k_escape(lua_State *L) {
   lua_longjmp *lj = (lua_longjmp *)lua_touserdata(L, lua_upvalueindex(1));
@@ -117,6 +118,105 @@ static int luaB_callec(lua_State *L) {
     return lua_gettop(L); /* stack now contains exactly the results */
   }
 }
+
+/*
+** Continuation invocation function (Phase 2.5: Direct VM re-entry)
+** Upvalue 1: the continuation object (as light userdata pointer)
+**
+** When continuation is called: k(values...)
+** This directly invokes the continuation by restoring the saved context
+** and resuming execution from the saved PC.
+*/
+static int cont_call(lua_State *L) {
+  Continuation *cont;
+  int nargs = lua_gettop(L);
+  
+  /* Get continuation from upvalue (stored as light userdata) */
+  cont = (Continuation *)lua_touserdata(L, lua_upvalueindex(1));
+  if (cont == NULL) {
+    return luaL_error(L, "continuation pointer is NULL");
+  }
+  
+  /* Validate continuation */
+  if (cont->tt != ctb(LUA_VCONT)) {
+    return luaL_error(L, "continuation has wrong type tag: %d (expected %d)", 
+                      cont->tt, ctb(LUA_VCONT));
+  }
+  
+  if (cont->L != L) {
+    return luaL_error(L, "continuation from different thread");
+  }
+  
+  /* Phase 2.5: Direct invocation
+  ** luaCont_invoke will restore the context and resume execution.
+  ** 
+  ** Note: luaCont_invoke calls luaV_execute which may not return normally
+  ** if the continuation transfers control elsewhere. We need to handle this.
+  */
+  
+  /* Invoke continuation - this may not return! */
+  luaCont_invoke(L, cont, nargs);
+  
+  /* If we get here, luaV_execute returned normally.
+  ** Return whatever is on the stack. */
+  return lua_gettop(L);
+}
+
+
+/*
+** callcc implementation (Phase 2.5: Direct invocation)
+** Takes a function and calls it with a continuation object
+** The continuation can be invoked multiple times (multi-shot)
+*/
+static int luaB_callcc(lua_State *L) {
+  Continuation *cont;
+  int nresults;
+  
+  /* Argument must be a function */
+  luaL_checktype(L, 1, LUA_TFUNCTION);
+  
+  /* Capture current continuation (level 1 = caller of callcc) */
+  cont = luaCont_capture(L, 1);
+  if (cont == NULL) {
+    return luaL_error(L, "cannot capture continuation (C frame boundary)");
+  }
+  
+  /* Stack: [function] */
+  
+  /* CRITICAL FIX: Push continuation as GCObject to protect from premature collection
+  ** We temporarily push it as a string-like value that GC can see,
+  ** then immediately convert to light userdata for the closure.
+  ** Alternative: Stop GC during this critical section. */
+  
+  /* Disable GC temporarily to prevent collection during closure creation */
+  lu_byte old_gcstp = G(L)->gcstp;
+  G(L)->gcstp = 1;  /* stop GC */
+  
+  /* Push continuation pointer as light userdata */
+  lua_pushlightuserdata(L, cont);
+  
+  /* Create closure with continuation as upvalue */
+  lua_pushcclosure(L, cont_call, 1);
+  
+  /* Re-enable GC */
+  G(L)->gcstp = old_gcstp;
+  
+  /* Stack: [function, cont_closure] */
+  
+  /* Duplicate function and move it to top */
+  lua_pushvalue(L, 1);  /* Stack: [function, cont_closure, function] */
+  lua_insert(L, 2);     /* Stack: [function, function, cont_closure] */
+  lua_remove(L, 1);     /* Stack: [function, cont_closure] */
+  
+  /* Call function with continuation as argument
+  ** If continuation is invoked, luaCont_invoke will handle it */
+  lua_call(L, 1, LUA_MULTRET);
+  
+  /* Return whatever is on stack */
+  nresults = lua_gettop(L);
+  return nresults;
+}
+
 
 static const luaL_Reg cont_funcs[] = {
   {"callcc", luaB_callcc},

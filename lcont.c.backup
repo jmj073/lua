@@ -1,0 +1,267 @@
+/*
+** $Id: lcont.c $
+** Continuation support
+** See Copyright Notice in lua.h
+*/
+
+#define lcont_c
+#define LUA_CORE
+
+#include "lprefix.h"
+
+#include <string.h>
+#include <stdio.h>
+
+#include "lua.h"
+#include "lcont.h"
+#include "ldebug.h"
+#include "ldo.h"
+#include "lgc.h"
+#include "lmem.h"
+#include "lstate.h"
+#include "lstring.h"
+#include "ltable.h"
+#include "lvm.h"
+
+
+/*
+** Check if a CallInfo frame is a C function call
+*/
+static int isLuaFrame (CallInfo *ci) {
+  return isLua(ci);
+}
+
+
+/*
+** Count the number of Lua frames from a given CallInfo to the end
+** Stops when encountering C frames (cannot capture C stack)
+*/
+static int countLuaFrames (CallInfo *ci) {
+  int count = 0;
+  while (ci != NULL) {
+    if (!isLuaFrame(ci))
+      break;  /* Stop at C frame */
+    count++;
+    ci = ci->next;
+  }
+  return count;
+}
+
+
+/*
+** Calculate stack size needed for continuation
+** Only captures Lua frames, stops at C boundary
+*/
+static int calcStackSize (lua_State *L, CallInfo *start_ci, StkId *base_out) {
+  StkId stack_base = start_ci->func.p;
+  StkId stack_top = L->top.p;
+  *base_out = stack_base;
+  return cast_int(stack_top - stack_base);
+}
+
+
+/*
+** Create a new continuation object (Phase 2)
+** 
+** Captures the CALLER context of callcc, not the internal function.
+** This means we capture the state of the function that CALLED callcc,
+** so that when the continuation is invoked, execution resumes from
+** the point immediately after the callcc call.
+** 
+** level parameter:
+**   0 = current function (callcc itself - C function)
+**   1 = caller of callcc (usually what we want)
+*/
+Continuation *luaCont_capture (lua_State *L, int level) {
+  CallInfo *ci;
+  CallInfo *caller_ci;
+  StkId caller_func;
+  StkId caller_top;
+  int stack_size;
+  Continuation *cont;
+  int i;
+  
+  /* Start from current CallInfo */
+  ci = L->ci;
+  
+  /* callcc is a C function, so L->ci is the C frame
+     We need to find the Lua caller */
+  caller_ci = ci->previous;
+  
+  /* Skip any C frames to find Lua caller */
+  while (caller_ci && !isLuaFrame(caller_ci)) {
+    caller_ci = caller_ci->previous;
+  }
+  
+  if (!caller_ci) {
+    return NULL;  /* No Lua caller found */
+  }
+  
+  /* Apply level offset (usually level=1 means direct caller) */
+  while (level > 1 && caller_ci->previous) {
+    caller_ci = caller_ci->previous;
+    if (isLuaFrame(caller_ci)) {
+      level--;
+    }
+  }
+  
+  if (!isLuaFrame(caller_ci)) {
+    return NULL;  /* Target frame is not Lua */
+  }
+  
+  /* Extract caller's context
+     Important: caller_ci->u.l.savedpc already points to the instruction
+     AFTER the callcc call, which is exactly where we want to resume! */
+  caller_func = caller_ci->func.p;
+  caller_top = caller_ci->top.p;
+  stack_size = cast_int(caller_top - caller_func);
+  
+  if (stack_size <= 0) {
+    return NULL;  /* Invalid stack size */
+  }
+  
+  /* Allocate continuation object */
+  cont = luaM_new(L, Continuation);
+  cont->tt = ctb(LUA_VCONT);
+  cont->marked = luaC_white(G(L));
+  cont->next = G(L)->allgc;
+  cont->L = L;
+  
+  /* Phase 2: Store caller context */
+  cont->resume_pc = caller_ci->u.l.savedpc;  /* PC after callcc call */
+  cont->func_offset = savestack(L, caller_func);
+  cont->stack_size = stack_size;
+  cont->callstatus = caller_ci->callstatus;
+  cont->gclist = NULL;
+  
+  /* Get function prototype for GC safety */
+  if (ttisLclosure(s2v(caller_func))) {
+    cont->proto = clLvalue(s2v(caller_func))->p;
+  } else {
+    cont->proto = NULL;
+  }
+  
+  /* Allocate and copy caller's stack */
+  cont->stack = luaM_newvector(L, stack_size, TValue);
+  for (i = 0; i < stack_size; i++) {
+    setobj(L, &cont->stack[i], s2v(caller_func + i));
+  }
+  
+  /* Update GC list */
+  G(L)->allgc = obj2gco(cont);
+  
+  return cont;
+}
+
+
+/*
+** Check if continuation is still valid for invocation
+*/
+int luaCont_isvalid (Continuation *cont, lua_State *L) {
+  if (cont == NULL)
+    return 0;
+  /* Check if invoked in same thread */
+  if (cont->L != L)
+    return 0;
+  /* Check if continuation object hasn't been corrupted */
+  if (cont->tt != ctb(LUA_VCONT))
+    return 0;
+  return 1;
+}
+
+
+/*
+** Data for protected continuation invocation
+*/
+struct InvokeData {
+  Continuation *cont;
+  int nargs;
+  TValue *saved_args;
+};
+
+
+/*
+** Protected function that does the actual continuation invocation
+** This runs inside luaD_rawrunprotected, providing proper error handling
+** and stack management that luaV_execute expects.
+*/
+/* ULTRA-SIMPLIFIED: Just push continuation args to stack
+** No VM re-entry, no stack restoration - just return the values */
+static void do_invoke_simple (lua_State *L, void *ud) {
+  struct InvokeData *data = (struct InvokeData *)ud;
+  int nargs = data->nargs;
+  TValue *saved_args = data->saved_args;
+  int i;
+  
+  fprintf(stderr, "[DEBUG] do_invoke_simple: pushing %d args to stack\n", nargs);
+  
+  /* Simply push the continuation arguments onto the current stack */
+  luaD_checkstack(L, nargs);
+  for (i = 0; i < nargs; i++) {
+    setobj2s(L, L->top.p, &saved_args[i]);
+    L->top.p++;
+  }
+  
+  fprintf(stderr, "[DEBUG] do_invoke_simple: %d values on stack, returning\n", nargs);
+}
+
+
+/*
+** Invoke a continuation with given arguments (Phase 2.5: Protected VM Re-entry)
+** 
+** This uses the coroutine resume pattern: wrap the actual invocation
+** in luaD_rawrunprotected to provide proper error handling and stack management.
+*/
+void luaCont_invoke (lua_State *L, Continuation *cont, int nargs) {
+  struct InvokeData data;
+  TStatus status;
+  int i;
+  
+  /* Validation */
+  if (!luaCont_isvalid(cont, L)) {
+    luaG_runerror(L, "invalid continuation");
+  }
+  
+  /* Save arguments from current stack before changing context
+  ** Arguments are at stack positions 1, 2, ... nargs in cont_call */
+  data.cont = cont;
+  data.nargs = nargs;
+  data.saved_args = NULL;
+  
+  if (nargs > 0) {
+    data.saved_args = luaM_newvector(L, nargs, TValue);
+    for (i = 0; i < nargs; i++) {
+      StkId arg_pos = L->stack.p + i;
+      setobj(L, &data.saved_args[i], s2v(arg_pos));
+    }
+  }
+  
+  /* Call the SIMPLIFIED invocation function
+  ** This prepares return values without re-entering VM */
+  status = luaD_rawrunprotected(L, do_invoke_simple, &data);
+  
+  /* Free temporary argument storage */
+  if (data.saved_args) {
+    luaM_freearray(L, data.saved_args, nargs);
+  }
+  
+  /* Handle any errors */
+  if (status != LUA_OK) {
+    /* Error occurred during continuation execution */
+    luaG_runerror(L, "error in continuation");
+  }
+  
+  /* Success - results are on the stack */
+}
+
+
+/*
+** Free continuation resources
+*/
+void luaCont_free (lua_State *L, Continuation *cont) {
+  if (cont->stack != NULL) {
+    luaM_freearray(L, cont->stack, cont->stack_size);
+  }
+  /* Phase 2: No separate CallInfo structures to free */
+  luaM_free(L, cont);
+}
