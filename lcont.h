@@ -24,7 +24,7 @@ LUAI_FUNC int luaCont_isvalid (Continuation *cont, lua_State *L);
 
 /* VM-level continuation invocation */
 LUAI_FUNC int luaCont_iscontinvoke (const TValue *func);
-LUAI_FUNC void luaCont_doinvoke (lua_State *L, StkId func, int nresults);
+LUAI_FUNC int luaCont_doinvoke (lua_State *L, StkId func, int nresults);
 
 /* Get cont_call function pointer for comparison */
 LUAI_FUNC lua_CFunction luaCont_getcallfunc (void);

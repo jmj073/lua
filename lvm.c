@@ -1776,10 +1776,13 @@ void luaV_execute (lua_State *L, CallInfo *ci) {
         /* ⭐ CHECK: Is this a continuation invocation? */
         if (luaCont_iscontinvoke(s2v(ra))) {
           /* Special handling: direct continuation invoke */
-          luaCont_doinvoke(L, ra, nresults);
-          /* CRITICAL: Reload PC and continue from new location */
+          int returned_args = luaCont_doinvoke(L, ra, nresults);
+          /* CRITICAL: doinvoke has placed results at RA position
+          ** and injected the continuation's context.
+          ** Now reload and continue execution from new PC */
+          (void)returned_args;  /* suppress unused warning */
           updatebase(ci);  /* Update base pointer */
-          pc = ci->u.l.savedpc;  /* Reload PC from ci */
+          pc = ci->u.l.savedpc;  /* Reload PC from injected context */
           updatetrap(ci);
           goto startfunc;  /* Restart execution from new PC */
         }
