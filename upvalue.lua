@@ -1,19 +1,16 @@
 local cont = require("continuation")
 
 local x = 0
-local asdf = nil
-local k = cont.callcc(fn(k) {
-    asdf = k
-    return k
+local n
+_G.k, n = cont.callcc(fn(cont) {
+    return cont, 3
 })
 
 print(x)
 x = x + 1
 
-if k {
-    k(false)
+if n > 0 {
+    k(k, n - 1)
 } else {
     print(x)
 }
-
-asdf(false)
