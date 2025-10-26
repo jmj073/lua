@@ -303,6 +303,8 @@ int luaCont_doinvoke (lua_State *L, StkId func, int nresults) {
   CClosure *cl;
   Continuation *cont;
   lua_State *thread;
+  lua_State *clone;
+  int clone_ref;
   int i;
   int nargs;
   const Instruction *saved_pc;
@@ -310,7 +312,7 @@ int luaCont_doinvoke (lua_State *L, StkId func, int nresults) {
   int ra_offset;
   StkId thread_dest;
   
-  fprintf(stderr, "[CONT] luaCont_doinvoke: starting (Trampoline approach)\n");
+  fprintf(stderr, "[CONT] luaCont_doinvoke: starting (Trampoline + Multi-shot)\n");
   
   /* Extract continuation from closure upvalue */
   cl = clCvalue(s2v(func));
@@ -320,8 +322,12 @@ int luaCont_doinvoke (lua_State *L, StkId func, int nresults) {
     luaG_runerror(L, "invalid continuation");
   }
   
-  /* Get continuation thread (single-shot for now) */
-  thread = cont->thread;
+  /* ⭐ MULTI-SHOT: Clone the thread to preserve original state */
+  clone = cloneThreadForInvoke(L, cont->thread, &clone_ref);
+  thread = clone;
+  
+  fprintf(stderr, "[CONT]   Cloned thread %p → %p (ref=%d)\n",
+          (void*)cont->thread, (void*)clone, clone_ref);
   
   /* Count arguments (everything after func on stack) */
   nargs = cast_int(L->top.p - (func + 1));
@@ -381,6 +387,13 @@ int luaCont_doinvoke (lua_State *L, StkId func, int nresults) {
     fprintf(stderr, "%lld\n", (long long)ivalue(s2v(result_pos)));
   } else {
     fprintf(stderr, "(not int)\n");
+  }
+  
+  /* ⭐ MULTI-SHOT: Release clone from registry
+  ** Original thread is preserved in continuation! */
+  if (clone_ref != LUA_NOREF) {
+    luaL_unref(L, LUA_REGISTRYINDEX, clone_ref);
+    fprintf(stderr, "[CONT]   Released clone ref=%d (original preserved)\n", clone_ref);
   }
   
   fprintf(stderr, "[CONT] luaCont_doinvoke: done, returning %d args\n", nargs);
