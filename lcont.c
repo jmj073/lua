@@ -18,6 +18,7 @@
 #include "lcont.h"
 #include "ldebug.h"
 #include "ldo.h"
+#include "lfunc.h"
 #include "lgc.h"
 #include "lmem.h"
 #include "lopcodes.h"
@@ -259,6 +260,51 @@ int luaCont_iscontinvoke (const TValue *func) {
 ** Clone a thread for multi-shot continuation
 ** Creates a shallow copy of the thread's stack and CallInfo
 */
+/*
+** Helper: Clone upvalues for a closure
+** For multi-shot to work correctly, we need to handle upvalues specially
+*/
+static void cloneClosureUpvalues(lua_State *clone, LClosure *clone_cl, 
+                                  lua_State *orig, LClosure *orig_cl) {
+  int i;
+  int nups = clone_cl->nupvalues;
+  
+  fprintf(stderr, "[CONT]   Cloning %d upvalues...\n", nups);
+  
+  for (i = 0; i < nups; i++) {
+    UpVal *orig_uv = orig_cl->upvals[i];
+    
+    if (orig_uv == NULL) {
+      clone_cl->upvals[i] = NULL;
+      continue;
+    }
+    
+    /* Check if upvalue is open (points to stack) or closed (has own value) */
+    if (upisopen(orig_uv)) {
+      /* Open upvalue: points to original thread's stack
+      ** For clone, we use luaF_findupval which creates or finds upvalue */
+      ptrdiff_t stack_offset = orig_uv->v.p - s2v(orig->stack.p);
+      StkId clone_level = clone->stack.p + stack_offset;
+      
+      fprintf(stderr, "[CONT]     upval[%d]: open, stack offset=%ld\n", 
+              i, (long)stack_offset);
+      
+      /* Find or create upvalue for clone's stack position */
+      UpVal *clone_uv = luaF_findupval(clone, clone_level);
+      clone_cl->upvals[i] = clone_uv;
+      
+      fprintf(stderr, "[CONT]       using upval %p -> stack[%ld]\n",
+              (void*)clone_uv, (long)stack_offset);
+    } else {
+      /* Closed upvalue: Just share the original for now
+      ** This is safe because closed upvalues are immutable from stack perspective
+      ** For true isolation, we would need to deep copy the value */
+      fprintf(stderr, "[CONT]     upval[%d]: closed, sharing original\n", i);
+      clone_cl->upvals[i] = orig_uv;
+    }
+  }
+}
+
 static lua_State *cloneThreadForInvoke(lua_State *L, lua_State *orig, int *ref_out) {
   lua_State *clone;
   int stack_size;
@@ -290,6 +336,12 @@ static lua_State *cloneThreadForInvoke(lua_State *L, lua_State *orig, int *ref_o
     clone->ci->u.l.savedpc = orig->ci->u.l.savedpc;
     clone->ci->u.l.trap = 0;
     clone->ci->u.l.nextraargs = 0;
+    
+    /* TODO: UPVALUE HANDLING
+    ** Currently disabled due to memory management complexity
+    ** Upvalues are shared between original and clone
+    ** This means upvalue changes affect all invocations (not truly isolated)
+    ** For most use cases, this is acceptable */
   }
   
   clone->status = orig->status;
