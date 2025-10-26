@@ -1231,6 +1231,13 @@ void luaV_injectcontext (lua_State *L, lua_State *source) {
   fprintf(stderr, "[VM]   context injected successfully\n");
   fprintf(stderr, "[VM]   new PC=%p, func=%p, top=%p\n",
           (void*)L_ci->u.l.savedpc, (void*)L_ci->func.p, (void*)L->top.p);
+  
+  /* Debug: Show first few stack slots */
+  fprintf(stderr, "[VM]   Stack after injection:\n");
+  for (i = 0; i < 5 && (dest + i) < L->stack_last.p; i++) {
+    fprintf(stderr, "[VM]     slot[%d] at %p type=%d\n", 
+            i, (void*)(dest + i), ttype(s2v(dest + i)));
+  }
 }
 
 

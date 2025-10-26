@@ -254,10 +254,53 @@ int luaCont_iscontinvoke (const TValue *func) {
 ** Direct continuation invocation from VM
 ** Uses VM-level context injection for proper continuation semantics
 */
+/*
+** Clone a thread for multi-shot continuation
+** Creates a shallow copy of the thread's stack and CallInfo
+*/
+static lua_State *cloneThreadForInvoke(lua_State *L, lua_State *orig) {
+  lua_State *clone;
+  int stack_size;
+  int i;
+  
+  fprintf(stderr, "[CONT] cloneThreadForInvoke: cloning thread %p\n", (void*)orig);
+  
+  /* Create new thread */
+  clone = lua_newthread(L);
+  lua_pop(L, 1);  /* Remove from stack */
+  
+  /* Copy stack */
+  stack_size = cast_int(orig->top.p - orig->stack.p);
+  luaD_checkstack(clone, stack_size);
+  
+  for (i = 0; i < stack_size; i++) {
+    setobj2s(clone, clone->stack.p + i, s2v(orig->stack.p + i));
+  }
+  clone->top.p = clone->stack.p + stack_size;
+  
+  /* Copy CallInfo state */
+  clone->ci->func.p = clone->stack.p + (orig->ci->func.p - orig->stack.p);
+  clone->ci->top.p = clone->top.p;
+  clone->ci->callstatus = orig->ci->callstatus;
+  
+  if (isLua(orig->ci)) {
+    clone->ci->u.l.savedpc = orig->ci->u.l.savedpc;
+    clone->ci->u.l.trap = 0;
+    clone->ci->u.l.nextraargs = 0;
+  }
+  
+  clone->status = orig->status;
+  
+  fprintf(stderr, "[CONT]   clone created: %p\n", (void*)clone);
+  return clone;
+}
+
+
 void luaCont_doinvoke (lua_State *L, StkId func, int nresults) {
   CClosure *cl;
   Continuation *cont;
   lua_State *thread;
+  lua_State *clone;
   int i;
   int nargs;
   TValue *saved_args;
@@ -272,36 +315,59 @@ void luaCont_doinvoke (lua_State *L, StkId func, int nresults) {
     luaG_runerror(L, "invalid continuation");
   }
   
-  /* Get continuation thread */
+  /* Get continuation thread and clone it for multi-shot */
   thread = cont->thread;
+  clone = cloneThreadForInvoke(L, thread);
   
   /* Count arguments (everything after func on stack) */
   nargs = cast_int(L->top.p - (func + 1));
   fprintf(stderr, "[CONT]   %d arguments to save\n", nargs);
   
-  /* CRITICAL: Save arguments BEFORE injection!
-  ** After injection, stack contents will change */
-  saved_args = luaM_newvector(L, nargs, TValue);
+  /* CRITICAL: Place arguments in clone BEFORE injection!
+  ** The clone's stack (slot[1] onwards) will become the return values */
+  
+  fprintf(stderr, "[CONT]   placing %d arguments in clone at slot[1]\n", nargs);
+  
+  /* Clone's slot[0] is the function, slot[1] onwards are return values
+  ** We place our arguments there */
+  luaD_checkstack(clone, nargs + 1);
   for (i = 0; i < nargs; i++) {
-    setobj(L, &saved_args[i], s2v(func + 1 + i));
-    fprintf(stderr, "[CONT]   saved arg[%d] type=%d\n", i, ttype(&saved_args[i]));
+    setobj2s(clone, clone->ci->func.p + 1 + i, s2v(func + 1 + i));
+    fprintf(stderr, "[CONT]   arg[%d] placed in clone slot[%d], type=%d\n",
+            i, 1 + i, ttype(s2v(clone->ci->func.p + 1 + i)));
   }
   
-  /* ⭐ KEY: Inject thread's context
-  ** This replaces our CallInfo with thread's context */
-  luaV_injectcontext(L, thread);
+  /* Update clone's top to include arguments */
+  clone->top.p = clone->ci->func.p + 1 + nargs;
+  clone->ci->top.p = clone->top.p;
   
-  /* NOW place saved continuation arguments as return values at func position
-  ** These arguments become the "return values" from callcc */
-  for (i = 0; i < nargs; i++) {
-    setobj2s(L, func + i, &saved_args[i]);
-    fprintf(stderr, "[CONT]   arg[%d] placed at func+%d, type=%d\n", 
-            i, i, ttype(s2v(func + i)));
-  }
-  L->top.p = func + nargs;
+  /* ⭐ KEY: Inject clone's context (with arguments already placed)
+  ** This replaces our CallInfo with clone's context */
+  luaV_injectcontext(L, clone);
   
-  /* Free saved arguments */
-  luaM_freearray(L, saved_args, nargs);
+  /* CRITICAL: After injection, ci->func.p has changed!
+  ** We need to place arguments relative to NEW ci->func.p, not old func!
+  ** VM will execute with base = ci->func.p + 1 */
+  StkId new_func = L->ci->func.p;
+  fprintf(stderr, "[CONT]   After injection: new func=%p (was %p)\n",
+          (void*)new_func, (void*)func);
+  
+  /* Place arguments at new_func+1 (they're already in the injected stack) */
+  L->top.p = new_func + 1 + nargs;
+  
+  /* CRITICAL: The VM needs to see results starting from func+1
+  ** OP_CALL expects results there after call completion */
+  fprintf(stderr, "[CONT]   L->top set to func+%d\n", 1 + nargs);
+  
+  fprintf(stderr, "[CONT]   after injection, L->top=%p (func+%d)\n",
+          (void*)L->top.p, 1 + nargs);
+  
+  /* Debug: Show what's at func positions after injection */
+  fprintf(stderr, "[CONT]   Final stack state:\n");
+  fprintf(stderr, "[CONT]     new_func (0x%p) type=%d\n", 
+          (void*)new_func, ttype(s2v(new_func)));
+  fprintf(stderr, "[CONT]     new_func+1 (0x%p) type=%d\n", 
+          (void*)(new_func+1), ttype(s2v(new_func+1)));
   
   fprintf(stderr, "[CONT] luaCont_doinvoke: done, VM will continue in new context\n");
 }
