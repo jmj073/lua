@@ -1,7 +1,8 @@
 local cont = require("continuation")
+local cc = fn() { return cont.callcc(fn(k) { return k }) }
 
-local yin = cont.callcc(fn(k) { return k })
-print("@")
-local yang = cont.callcc(fn(k) { return k })
-print("*")
+local yin = cc()
+io.write("@")
+local yang = cc()
+io.write("*")
 yin(yang)

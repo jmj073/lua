@@ -1284,6 +1284,9 @@ void luaV_injectcontext (lua_State *L, lua_State *source) {
   L->top.p = dest_base + total_slots;
   L->nci = ci_count;
   
+  /* Note: Upvalues were already closed when the continuation was created,
+  ** so closures already have their own copies of upvalue values */
+  
   fprintf(stderr, "[VM]   context injected successfully\n");
   fprintf(stderr, "[VM]   new PC=%p, func=%p, top=%p\n",
           (void*)(isLua(L->ci) ? L->ci->u.l.savedpc : NULL), 

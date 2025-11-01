@@ -139,7 +139,46 @@ static void setupThreadForResume (lua_State *thread, lua_State *L, CallInfo *sou
   thread->status = LUA_YIELD;
   thread->nci = ci_count;
   
-  fprintf(stderr, "[DEBUG] setupThreadForResume: thread ready with %d CallInfos\n", ci_count);
+  /* Fix upvalues: Create independent UpVal objects for this continuation
+  ** This ensures each continuation has its own copy of upvalues */
+  for (i = 0; i < total_slots; i++) {
+    TValue *o = s2v(thread->stack.p + i);
+    if (ttisLclosure(o)) {
+      LClosure *cl = clLvalue(o);
+      int j;
+      for (j = 0; j < cl->nupvalues; j++) {
+        UpVal *old_uv = cl->upvals[j];
+        if (old_uv) {
+          /* Create a new UpVal for this closure */
+          UpVal *new_uv = luaM_new(thread, UpVal);
+          new_uv->v.p = &new_uv->u.value;  /* Always closed */
+          luaC_objbarrier(thread, cl, new_uv);
+          
+          /* Copy the value from the old upvalue */
+          if (upisopen(old_uv)) {
+            TValue *uv_ptr = old_uv->v.p;
+            /* Check if upvalue points within the original L's stack */
+            if (uv_ptr >= (TValue*)stack_bottom && uv_ptr < (TValue*)stack_top) {
+              /* Copy from corresponding position in thread's stack */
+              ptrdiff_t offset = (StkId)uv_ptr - stack_bottom;
+              setobj(thread, &new_uv->u.value, s2v(thread->stack.p + offset));
+            } else {
+              /* Copy from original location */
+              setobj(thread, &new_uv->u.value, old_uv->v.p);
+            }
+          } else {
+            /* Old upvalue was already closed */
+            setobj(thread, &new_uv->u.value, &old_uv->u.value);
+          }
+          
+          /* Replace the upvalue pointer in the closure */
+          cl->upvals[j] = new_uv;
+        }
+      }
+    }
+  }
+  
+  (void)ci_count;  /* Mark as used for non-debug builds */
 }
 
 
@@ -395,6 +434,9 @@ static lua_State *cloneThreadForInvoke(lua_State *L, lua_State *orig, int *ref_o
   
   clone->status = orig->status;
   clone->nci = ci_count;
+  
+  /* Note: Upvalues were already closed in setupThreadForResume, so the
+  ** cloned closures' upvalues already contain their own copies of values */
   
   fprintf(stderr, "[CONT]   clone created: %p, ref=%d\n", (void*)clone, *ref_out);
   return clone;
