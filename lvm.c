@@ -1185,8 +1185,17 @@ void luaV_finishOp (lua_State *L) {
 
 /*
 ** Inject execution context from source thread to target thread
-** This is the key function for continuation support
-** After injection, target thread will continue execution in source's context
+** CONTINUATION-SPECIFIC: Context injection for continuation invocation
+** 
+** This function is ONLY used by lcont.c:luaCont_doinvoke()
+** 
+** CRITICAL: Slot 0 (the closure) is NOT copied!
+** - L->ci->func.p contains the continuation closure (correct)
+** - source->ci->func.p contains the caller closure (wrong for continuation)
+** - Only the captured state (slots 1+) is restored
+** 
+** After injection, L will continue execution in source's context
+** with L's current closure.
 */
 void luaV_injectcontext (lua_State *L, lua_State *source) {
   CallInfo *L_ci = L->ci;
@@ -1203,12 +1212,18 @@ void luaV_injectcontext (lua_State *L, lua_State *source) {
   src_size = cast_int(src_ci->top.p - src_ci->func.p);
   
   fprintf(stderr, "[VM]   copying %d stack slots from source\n", src_size);
+  fprintf(stderr, "[VM]   preserving L->ci->func.p=%p (closure stays in place)\n", (void*)dest);
   
   /* Ensure we have enough space */
   luaD_checkstack(L, src_size + LUA_MINSTACK);
   
-  /* Copy entire stack frame from source */
-  for (i = 0; i < src_size; i++) {
+  /* Reload L_ci and dest AFTER checkstack as it may have reallocated */
+  L_ci = L->ci;
+  dest = L_ci->func.p;
+  
+  /* Copy stack frame from source, BUT skip slot 0 (the closure itself)
+  ** The closure at L_ci->func.p is already correct and should not be overwritten */
+  for (i = 1; i < src_size; i++) {
     setobj2s(L, dest + i, s2v(src_ci->func.p + i));
   }
   
@@ -1223,8 +1238,7 @@ void luaV_injectcontext (lua_State *L, lua_State *source) {
   L_ci->u.l.trap = 0;
   L_ci->u.l.nextraargs = 0;
   
-  /* Update stack pointers */
-  L_ci->func.p = dest;
+  /* Update top pointer (func.p stays unchanged) */
   L_ci->top.p = dest + src_size;
   L->top.p = L_ci->top.p;
   
@@ -1256,6 +1270,8 @@ void luaV_execute (lua_State *L, CallInfo *ci) {
   cl = ci_func(ci);
   k = cl->p->k;
   pc = ci->u.l.savedpc;
+  fprintf(stderr, "[VM_STARTFUNC] ci=%p, pc=%p, func=%p, base will be=%p\n",
+          (void*)ci, (void*)pc, (void*)ci->func.p, (void*)(ci->func.p + 1));
   if (l_unlikely(trap))
     trap = luaG_tracecall(L);
   base = ci->func.p + 1;
@@ -1267,7 +1283,7 @@ void luaV_execute (lua_State *L, CallInfo *ci) {
     { /* low-level line tracing for debugging Lua */
       #include "lopnames.h"
       int pcrel = pcRel(pc, cl->p);
-      printf("line: %d; %s (%d)\n", luaG_getfuncline(cl->p, pcrel),
+      printf("[VM_TRACE] line: %d; %s (%d)\n", luaG_getfuncline(cl->p, pcrel),
              opnames[GET_OPCODE(i)], pcrel);
     }
     #endif
@@ -1781,9 +1797,11 @@ void luaV_execute (lua_State *L, CallInfo *ci) {
           ** and injected the continuation's context.
           ** Now reload and continue execution from new PC */
           (void)returned_args;  /* suppress unused warning */
+          ci = L->ci;  /* Reload ci after injection */
           updatebase(ci);  /* Update base pointer */
           pc = ci->u.l.savedpc;  /* Reload PC from injected context */
           updatetrap(ci);
+          fprintf(stderr, "[CONT_RESUME] Resuming from continuation, pc=%p\n", (void*)pc);
           goto startfunc;  /* Restart execution from new PC */
         }
         

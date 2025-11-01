@@ -58,7 +58,7 @@ static CallInfo *findCallerCI (lua_State *L, int level) {
 ** Setup thread to resume from a specific PC
 ** This mimics a "yielded" state so lua_resume will continue execution
 */
-static void setupThreadForResume (lua_State *thread, CallInfo *source_ci) {
+static void setupThreadForResume (lua_State *thread, lua_State *L, CallInfo *source_ci) {
   CallInfo *ci;
   StkId func = source_ci->func.p;
   StkId top = source_ci->top.p;
@@ -137,7 +137,7 @@ Continuation *luaCont_capture (lua_State *L, int level) {
   fprintf(stderr, "[DEBUG] luaCont_capture: created thread=%p\n", (void*)thread);
   
   /* Setup thread with caller's state */
-  setupThreadForResume(thread, caller_ci);
+  setupThreadForResume(thread, L, caller_ci);
   
   /* Store thread in registry to protect from GC */
   ref = luaL_ref(L, LUA_REGISTRYINDEX);  /* This pops the thread from stack */
@@ -407,15 +407,14 @@ int luaCont_doinvoke (lua_State *L, StkId func, int nresults) {
   
   fprintf(stderr, "[CONT]   After injection: L->ci->func.p=%p, savedpc=%p\n",
           (void*)L->ci->func.p, (void*)L->ci->u.l.savedpc);
+  fprintf(stderr, "[CONT]   L->top.p=%p, L->ci->top.p=%p\n",
+          (void*)L->top.p, (void*)L->ci->top.p);
   
-  /* Update top to reflect the result */
-  StkId result_pos = L->ci->func.p + 1 + ra_offset;
-  L->top.p = result_pos + nargs;
-  
-  fprintf(stderr, "[CONT]   L->top.p set to %p (result_pos + %d)\n",
-          (void*)L->top.p, nargs);
+  /* Note: L->top.p and L->ci->top.p are already set correctly by luaV_injectcontext
+  ** Do not modify them here! */
   
   /* Verify what got injected */
+  StkId result_pos = L->ci->func.p + 1 + ra_offset;
   fprintf(stderr, "[CONT]   Verification - result_pos type=%d, value=",
           ttype(s2v(result_pos)));
   if (ttisinteger(s2v(result_pos))) {

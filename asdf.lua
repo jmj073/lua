@@ -1,8 +1,8 @@
 local cont = require("continuation")
 
 local x = 0
-local n
-_G.k, n = cont.callcc(fn(cont) {
+local n, k
+k, n = cont.callcc(fn(cont) {
     return cont, 3
 })
 
