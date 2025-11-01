@@ -1189,68 +1189,111 @@ void luaV_finishOp (lua_State *L) {
 ** 
 ** This function is ONLY used by lcont.c:luaCont_doinvoke()
 ** 
-** CRITICAL: Slot 0 (the closure) is NOT copied!
-** - L->ci->func.p contains the continuation closure (correct)
-** - source->ci->func.p contains the caller closure (wrong for continuation)
-** - Only the captured state (slots 1+) is restored
-** 
-** After injection, L will continue execution in source's context
-** with L's current closure.
+** RESTORES ENTIRE CALLINFO CHAIN from source to L
+** This allows continuations to properly return from nested function calls
 */
 void luaV_injectcontext (lua_State *L, lua_State *source) {
-  CallInfo *L_ci = L->ci;
-  CallInfo *src_ci = source->ci;
-  StkId dest;
-  int src_size;
-  int i;
+  StkId src_stack_base = source->stack.p;
+  StkId src_stack_top = source->top.p;
+  int total_slots = cast_int(src_stack_top - src_stack_base);
+  ptrdiff_t stack_offset;
+  CallInfo *src_ci;
+  CallInfo *dst_ci;
+  CallInfo *call_ci;  /* The CI that called the continuation */
+  int i, ci_count;
   
-  fprintf(stderr, "[VM] luaV_injectcontext: injecting context from %p to %p\n",
+  fprintf(stderr, "[VM] luaV_injectcontext: injecting FULL context from %p to %p\n",
           (void*)source, (void*)L);
+  fprintf(stderr, "[VM]   Source has %d CallInfos\n", source->nci);
   
-  /* Phase 1: Stack injection - copy source's stack to current position */
-  dest = L_ci->func.p;
-  src_size = cast_int(src_ci->top.p - src_ci->func.p);
+  /* Save the continuation call site (we need to replace everything BELOW it) */
+  call_ci = L->ci;
   
-  fprintf(stderr, "[VM]   copying %d stack slots from source\n", src_size);
-  fprintf(stderr, "[VM]   preserving L->ci->func.p=%p (closure stays in place)\n", (void*)dest);
+  /* Phase 1: Stack injection - copy ENTIRE source stack */
+  fprintf(stderr, "[VM]   copying %d stack slots\n", total_slots);
   
   /* Ensure we have enough space */
-  luaD_checkstack(L, src_size + LUA_MINSTACK);
+  luaD_checkstack(L, total_slots + LUA_MINSTACK);
   
-  /* Reload L_ci and dest AFTER checkstack as it may have reallocated */
-  L_ci = L->ci;
-  dest = L_ci->func.p;
+  /* Calculate where to place the stack - at the base of current frame */
+  StkId dest_base = call_ci->func.p;
   
-  /* Copy stack frame from source, BUT skip slot 0 (the closure itself)
-  ** The closure at L_ci->func.p is already correct and should not be overwritten */
-  for (i = 1; i < src_size; i++) {
-    setobj2s(L, dest + i, s2v(src_ci->func.p + i));
+  /* Copy entire stack from source */
+  for (i = 0; i < total_slots; i++) {
+    setobj2s(L, dest_base + i, s2v(src_stack_base + i));
   }
   
-  /* Phase 2: CallInfo transformation - convert to Lua frame */
-  fprintf(stderr, "[VM]   transforming CallInfo to Lua frame\n");
+  /* Calculate stack offset for pointer adjustments */
+  stack_offset = dest_base - src_stack_base;
+  fprintf(stderr, "[VM]   Stack offset: %ld\n", (long)stack_offset);
   
-  /* Remove C function flag, mark as Lua */
-  L_ci->callstatus = src_ci->callstatus & ~CIST_C;
+  /* Phase 2: CallInfo chain restoration */
+  /* Count source CallInfos */
+  ci_count = 0;
+  for (src_ci = &source->base_ci; src_ci != NULL && src_ci->next != NULL; src_ci = src_ci->next) {
+    ci_count++;
+  }
+  ci_count++; /* Include the last one */
   
-  /* Copy Lua execution state */
-  L_ci->u.l.savedpc = src_ci->u.l.savedpc;
-  L_ci->u.l.trap = 0;
-  L_ci->u.l.nextraargs = 0;
+  fprintf(stderr, "[VM]   Restoring %d CallInfos\n", ci_count);
   
-  /* Update top pointer (func.p stays unchanged) */
-  L_ci->top.p = dest + src_size;
-  L->top.p = L_ci->top.p;
+  /* Pop current CI and replace with source's chain */
+  /* First, go back to the CI before call_ci (the caller of continuation invoke) */
+  if (call_ci->previous) {
+    L->ci = call_ci->previous;
+  } else {
+    L->ci = &L->base_ci;
+  }
+  
+  /* Now build the source's CallInfo chain */
+  src_ci = &source->base_ci;
+  dst_ci = L->ci;
+  
+  for (i = 0; i < ci_count; i++) {
+    /* Allocate next CallInfo if needed */
+    if (dst_ci->next == NULL) {
+      dst_ci->next = luaE_extendCI(L);
+    }
+    dst_ci = dst_ci->next;
+    dst_ci->previous = L->ci;
+    L->ci = dst_ci;
+    
+    /* Copy CallInfo with adjusted pointers */
+    dst_ci->func.p = src_ci->func.p + stack_offset;
+    dst_ci->top.p = src_ci->top.p + stack_offset;
+    dst_ci->callstatus = src_ci->callstatus & ~CIST_HOOKED;
+    dst_ci->u2 = src_ci->u2;
+    
+    /* Copy union data */
+    if (isLua(src_ci)) {
+      dst_ci->u.l.savedpc = src_ci->u.l.savedpc;
+      dst_ci->u.l.trap = 0;
+      dst_ci->u.l.nextraargs = src_ci->u.l.nextraargs;
+    } else {
+      dst_ci->u.c = src_ci->u.c;
+    }
+    
+    fprintf(stderr, "[VM]     Restored CI[%d]: func=%p, top=%p, isLua=%d\n",
+            i, (void*)dst_ci->func.p, (void*)dst_ci->top.p, isLua(dst_ci));
+    
+    src_ci = src_ci->next;
+    if (src_ci == NULL) break;
+  }
+  
+  /* Update L's top to match restored stack */
+  L->top.p = dest_base + total_slots;
+  L->nci = ci_count;
   
   fprintf(stderr, "[VM]   context injected successfully\n");
   fprintf(stderr, "[VM]   new PC=%p, func=%p, top=%p\n",
-          (void*)L_ci->u.l.savedpc, (void*)L_ci->func.p, (void*)L->top.p);
+          (void*)(isLua(L->ci) ? L->ci->u.l.savedpc : NULL), 
+          (void*)L->ci->func.p, (void*)L->top.p);
   
   /* Debug: Show first few stack slots */
   fprintf(stderr, "[VM]   Stack after injection:\n");
-  for (i = 0; i < 5 && (dest + i) < L->stack_last.p; i++) {
+  for (i = 0; i < 5 && (dest_base + i) < L->stack_last.p; i++) {
     fprintf(stderr, "[VM]     slot[%d] at %p type=%d\n", 
-            i, (void*)(dest + i), ttype(s2v(dest + i)));
+            i, (void*)(dest_base + i), ttype(s2v(dest_base + i)));
   }
 }
 
@@ -1265,6 +1308,8 @@ void luaV_execute (lua_State *L, CallInfo *ci) {
 #include "ljumptab.h"
 #endif
  startfunc:
+  /* Reload ci from L->ci in case it was changed (e.g., by continuation) */
+  ci = L->ci;
   trap = L->hookmask;
  returning:  /* trap already set */
   cl = ci_func(ci);

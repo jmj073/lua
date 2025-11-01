@@ -56,53 +56,90 @@ static CallInfo *findCallerCI (lua_State *L, int level) {
 
 /*
 ** Setup thread to resume from a specific PC
-** This mimics a "yielded" state so lua_resume will continue execution
+** CAPTURES ENTIRE CALLINFO CHAIN from base to source_ci
+** This is necessary for continuations that return from nested functions
 */
 static void setupThreadForResume (lua_State *thread, lua_State *L, CallInfo *source_ci) {
-  CallInfo *ci;
-  StkId func = source_ci->func.p;
-  StkId top = source_ci->top.p;
-  int nslots = cast_int(top - func);
+  StkId stack_bottom = L->stack.p;
+  StkId stack_top = L->top.p;
+  int total_slots = cast_int(stack_top - stack_bottom);
   int i;
+  CallInfo *src_ci;
+  CallInfo *dst_ci;
+  ptrdiff_t stack_offset;
   
-  fprintf(stderr, "[DEBUG] setupThreadForResume: copying %d stack slots\n", nslots);
+  fprintf(stderr, "[DEBUG] setupThreadForResume: copying ENTIRE stack (%d slots)\n", total_slots);
+  fprintf(stderr, "[DEBUG]   Source stack: %p to %p\n", (void*)stack_bottom, (void*)stack_top);
   
-  /* Ensure enough stack space */
-  luaD_checkstack(thread, nslots + LUA_MINSTACK);
+  /* Ensure enough stack space for entire stack */
+  luaD_checkstack(thread, total_slots + LUA_MINSTACK);
   
-  /* Copy stack from source */
-  for (i = 0; i < nslots; i++) {
-    setobj2s(thread, thread->stack.p + i, s2v(func + i));
+  /* Copy ENTIRE stack from L to thread */
+  for (i = 0; i < total_slots; i++) {
+    setobj2s(thread, thread->stack.p + i, s2v(stack_bottom + i));
   }
-  thread->top.p = thread->stack.p + nslots;
+  thread->top.p = thread->stack.p + total_slots;
   
-  /* Setup base CallInfo */
-  ci = thread->ci;
-  ci->func.p = thread->stack.p;
-  ci->top.p = thread->top.p;
-  ci->callstatus = source_ci->callstatus & ~CIST_HOOKED;  /* Remove hook flag */
+  /* Calculate offset for pointer adjustment */
+  stack_offset = thread->stack.p - stack_bottom;
+  fprintf(stderr, "[DEBUG]   Stack offset: %ld\n", (long)stack_offset);
   
-  /* Copy Lua execution state */
-  if (isLua(source_ci)) {
-    /* CRITICAL: PC adjustment
-    ** savedpc points to NEXT instruction after callcc
-    ** But lua_resume will do savedpc-- (like line 939 in ldo.c)
-    ** So we DON'T adjust here - let resume handle it */
-    ci->u.l.savedpc = source_ci->u.l.savedpc;
-    ci->u.l.trap = 0;
-    ci->u.l.nextraargs = 0;
+  /* Now copy CallInfo chain from base_ci to source_ci */
+  /* First, count how many CallInfo nodes we need */
+  int ci_count = 0;
+  for (src_ci = &L->base_ci; src_ci != NULL && src_ci != source_ci->next; src_ci = src_ci->next) {
+    ci_count++;
+  }
+  fprintf(stderr, "[DEBUG]   CallInfo chain length: %d\n", ci_count);
+  
+  /* Start with thread's base_ci and build the chain */
+  dst_ci = &thread->base_ci;
+  src_ci = &L->base_ci;
+  
+  for (i = 0; i < ci_count; i++) {
+    /* Allocate next CallInfo if needed (skip base_ci which already exists) */
+    if (i > 0) {
+      if (dst_ci->next == NULL) {
+        dst_ci->next = luaE_extendCI(thread);
+      }
+      dst_ci = dst_ci->next;
+      dst_ci->previous = thread->ci;
+      thread->ci = dst_ci;
+    }
     
-    /* Mark as HOOKYIELD so resume will do savedpc-- */
-    ci->callstatus |= CIST_HOOKYIELD;
+    /* Copy CallInfo fields with adjusted pointers */
+    dst_ci->func.p = src_ci->func.p + stack_offset;
+    dst_ci->top.p = src_ci->top.p + stack_offset;
+    dst_ci->callstatus = src_ci->callstatus & ~CIST_HOOKED;
+    dst_ci->u2 = src_ci->u2;
     
-    fprintf(stderr, "[DEBUG] setupThreadForResume: PC=%p (will be adjusted by resume)\n", 
-            (void*)ci->u.l.savedpc);
+    /* Copy union data (Lua or C) */
+    if (isLua(src_ci)) {
+      dst_ci->u.l.savedpc = src_ci->u.l.savedpc;
+      dst_ci->u.l.trap = 0;
+      dst_ci->u.l.nextraargs = src_ci->u.l.nextraargs;
+    } else {
+      dst_ci->u.c = src_ci->u.c;
+    }
+    
+    fprintf(stderr, "[DEBUG]     CI[%d]: func=%p, top=%p, status=0x%x\n",
+            i, (void*)dst_ci->func.p, (void*)dst_ci->top.p, dst_ci->callstatus);
+    
+    src_ci = src_ci->next;
+  }
+  
+  /* Mark the top CallInfo for resume */
+  if (isLua(thread->ci)) {
+    thread->ci->callstatus |= CIST_HOOKYIELD;
+    fprintf(stderr, "[DEBUG]   Top CI PC=%p (will be adjusted by resume)\n", 
+            (void*)thread->ci->u.l.savedpc);
   }
   
   /* Set thread status to YIELD so lua_resume will continue execution */
   thread->status = LUA_YIELD;
+  thread->nci = ci_count;
   
-  fprintf(stderr, "[DEBUG] setupThreadForResume: thread ready, status=YIELD\n");
+  fprintf(stderr, "[DEBUG] setupThreadForResume: thread ready with %d CallInfos\n", ci_count);
 }
 
 
@@ -291,7 +328,9 @@ static void setupClonedClosureUpvalues(LClosure *clone_cl, LClosure *orig_cl) {
 static lua_State *cloneThreadForInvoke(lua_State *L, lua_State *orig, int *ref_out) {
   lua_State *clone;
   int stack_size;
-  int i;
+  int i, ci_count;
+  CallInfo *src_ci, *dst_ci;
+  ptrdiff_t stack_offset;
   
   fprintf(stderr, "[CONT] cloneThreadForInvoke: cloning thread %p\n", (void*)orig);
   
@@ -314,20 +353,48 @@ static lua_State *cloneThreadForInvoke(lua_State *L, lua_State *orig, int *ref_o
   
   fprintf(stderr, "[CONT]   Stack copied: %d slots (shallow copy)\n", stack_size);
   
-  /* Copy CallInfo state */
-  clone->ci->func.p = clone->stack.p + (orig->ci->func.p - orig->stack.p);
-  clone->ci->top.p = clone->top.p;
-  clone->ci->callstatus = orig->ci->callstatus;
+  /* Calculate stack offset for pointer adjustments */
+  stack_offset = clone->stack.p - orig->stack.p;
   
-  if (isLua(orig->ci)) {
-    clone->ci->u.l.savedpc = orig->ci->u.l.savedpc;
-    clone->ci->u.l.trap = 0;
-    clone->ci->u.l.nextraargs = 0;
+  /* Copy ENTIRE CallInfo chain */
+  ci_count = orig->nci;
+  fprintf(stderr, "[CONT]   Cloning %d CallInfos\n", ci_count);
+  
+  src_ci = &orig->base_ci;
+  dst_ci = &clone->base_ci;
+  
+  for (i = 0; i < ci_count; i++) {
+    /* Allocate next CallInfo if needed */
+    if (i > 0) {
+      if (dst_ci->next == NULL) {
+        dst_ci->next = luaE_extendCI(clone);
+      }
+      dst_ci = dst_ci->next;
+      dst_ci->previous = clone->ci;
+      clone->ci = dst_ci;
+    }
     
-    /* Upvalues are handled during stack copy above */
+    /* Copy CallInfo with adjusted pointers */
+    dst_ci->func.p = src_ci->func.p + stack_offset;
+    dst_ci->top.p = src_ci->top.p + stack_offset;
+    dst_ci->callstatus = src_ci->callstatus;
+    dst_ci->u2 = src_ci->u2;
+    
+    /* Copy union data */
+    if (isLua(src_ci)) {
+      dst_ci->u.l.savedpc = src_ci->u.l.savedpc;
+      dst_ci->u.l.trap = 0;
+      dst_ci->u.l.nextraargs = src_ci->u.l.nextraargs;
+    } else {
+      dst_ci->u.c = src_ci->u.c;
+    }
+    
+    src_ci = src_ci->next;
+    if (src_ci == NULL) break;
   }
   
   clone->status = orig->status;
+  clone->nci = ci_count;
   
   fprintf(stderr, "[CONT]   clone created: %p, ref=%d\n", (void*)clone, *ref_out);
   return clone;
@@ -368,6 +435,12 @@ int luaCont_doinvoke (lua_State *L, StkId func, int nresults) {
   nargs = cast_int(L->top.p - (func + 1));
   fprintf(stderr, "[CONT]   %d arguments to continuation\n", nargs);
   
+  /* Save arguments BEFORE injection (they will be overwritten) */
+  TValue saved_args[MAXRESULTS];
+  for (i = 0; i < nargs && i < MAXRESULTS; i++) {
+    setobj(L, &saved_args[i], s2v(func + 1 + i));
+  }
+  
   /* ⭐ TRAMPOLINE STEP 1: Calculate destination in thread BEFORE injection
   ** Extract RA offset from the CALL instruction that captured this continuation */
   saved_pc = thread->ci->u.l.savedpc;
@@ -377,32 +450,12 @@ int luaCont_doinvoke (lua_State *L, StkId func, int nresults) {
   fprintf(stderr, "[CONT]   CALL instruction RA offset = %d\n", ra_offset);
   fprintf(stderr, "[CONT]   Thread base = %p\n", (void*)thread->ci->func.p);
   
-  /* ⭐ TRAMPOLINE STEP 2: Prepare thread by placing arguments at destination
-  ** This is the "trampoline" - we're setting up the thread's stack
-  ** so that when injected, everything is already in place */
-  thread_dest = thread->ci->func.p + 1 + ra_offset;
+  fprintf(stderr, "[CONT]   CALL instruction RA offset = %d, will place %d args\n", 
+          ra_offset, nargs);
   
-  fprintf(stderr, "[CONT]   Thread destination = %p (base + 1 + %d)\n",
-          (void*)thread_dest, ra_offset);
-  
-  /* Ensure thread has enough stack space */
-  luaD_checkstack(thread, ra_offset + nargs + LUA_MINSTACK);
-  
-  /* Copy arguments to thread's destination */
-  for (i = 0; i < nargs; i++) {
-    setobjs2s(thread, thread_dest + i, func + 1 + i);
-    fprintf(stderr, "[CONT]   Prepared arg[%d] in thread at offset %d, type=%d, value=",
-            i, ra_offset + i, ttype(s2v(thread_dest + i)));
-    if (ttisinteger(s2v(thread_dest + i))) {
-      fprintf(stderr, "%lld\n", (long long)ivalue(s2v(thread_dest + i)));
-    } else {
-      fprintf(stderr, "(not int)\n");
-    }
-  }
-  
-  /* ⭐ TRAMPOLINE STEP 3: Now inject - arguments are already in place!
-  ** Injection will copy the prepared thread stack to L */
-  fprintf(stderr, "[CONT]   Injecting prepared thread context...\n");
+  /* ⭐ STEP 2: Inject context FIRST (this restores the captured state)
+  ** After injection, the CallInfo chain and stack will be restored */
+  fprintf(stderr, "[CONT]   Injecting context...\n");
   luaV_injectcontext(L, thread);
   
   fprintf(stderr, "[CONT]   After injection: L->ci->func.p=%p, savedpc=%p\n",
@@ -410,14 +463,38 @@ int luaCont_doinvoke (lua_State *L, StkId func, int nresults) {
   fprintf(stderr, "[CONT]   L->top.p=%p, L->ci->top.p=%p\n",
           (void*)L->top.p, (void*)L->ci->top.p);
   
-  /* Note: L->top.p and L->ci->top.p are already set correctly by luaV_injectcontext
-  ** Do not modify them here! */
-  
-  /* Verify what got injected */
+  /* ⭐ STEP 3: Now copy arguments to the injected context
+  ** Arguments go to the position specified by RA offset in the CALL instruction
+  ** IMPORTANT: Use the captured context's func.p, not the original */
   StkId result_pos = L->ci->func.p + 1 + ra_offset;
-  fprintf(stderr, "[CONT]   Verification - result_pos type=%d, value=",
+  
+  fprintf(stderr, "[CONT]   Placing %d args at result_pos=%p (func.p + 1 + %d)\n",
+          nargs, (void*)result_pos, ra_offset);
+  
+  /* Ensure we have enough space */
+  luaD_checkstack(L, nargs + LUA_MINSTACK);
+  
+  /* Copy arguments from saved_args to result position */
+  for (i = 0; i < nargs; i++) {
+    setobj2s(L, result_pos + i, &saved_args[i]);
+    fprintf(stderr, "[CONT]   Placed arg[%d] type=%d, value=",
+            i, ttype(s2v(result_pos + i)));
+    if (ttisinteger(s2v(result_pos + i))) {
+      fprintf(stderr, "%lld\n", (long long)ivalue(s2v(result_pos + i)));
+    } else {
+      fprintf(stderr, "(not int)\n");
+    }
+  }
+  
+  /* Update top to include the arguments */
+  if (result_pos + nargs > L->top.p) {
+    L->top.p = result_pos + nargs;
+  }
+  
+  /* Verify what we placed */
+  fprintf(stderr, "[CONT]   Verification - result_pos[0] type=%d\n",
           ttype(s2v(result_pos)));
-  if (ttisinteger(s2v(result_pos))) {
+  if (nargs > 0 && ttisinteger(s2v(result_pos))) {
     fprintf(stderr, "%lld\n", (long long)ivalue(s2v(result_pos)));
   } else {
     fprintf(stderr, "(not int)\n");
