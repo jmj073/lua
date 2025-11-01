@@ -30,98 +30,155 @@ lua_CFunction luaCont_getcallfunc (void) {
 static int k_escape(lua_State *L) {
   lua_longjmp *lj = (lua_longjmp *)lua_touserdata(L, lua_upvalueindex(1));
   lua_State *origin_L = (lua_State *)lua_touserdata(L, lua_upvalueindex(2));
+  int result_ref = (int)lua_tointeger(L, lua_upvalueindex(3));  /* registry ref for result table */
+  
   /* Check if we're trying to escape across coroutine boundaries */
   if (L != origin_L) {
     return luaL_error(L, "cannot escape across coroutine boundaries");
   }
-  /* Check if the escape continuation is still valid */
-  /* Use lj+1 as key for validity flag to avoid collision with result table */
-  lua_pushlightuserdata(L, (void*)((char*)lj + 1));
-  lua_rawget(L, LUA_REGISTRYINDEX);
-  if (!lua_toboolean(L, -1)) {
-    lua_pop(L, 1);
+  
+  /* Check if the escape continuation is still valid (result_ref >= 0) */
+  if (result_ref == LUA_NOREF || result_ref == LUA_REFNIL) {
     return luaL_error(L, "escape continuation is no longer valid");
   }
-  lua_pop(L, 1);
-  /* Pack arguments into a table and stash in registry under key 'lj' */
-  int n = lua_gettop(L);
-  int i;
-  lua_createtable(L, n, 0);
-  {
-    int t = lua_absindex(L, -1);
-    luaL_checktype(L, t, LUA_TTABLE);
-    for (i = 1; i <= n; i++) {
-      lua_pushvalue(L, i);
-      lua_rawseti(L, t, i);
-    }
-    /* registry[lj] = table */
-    lua_pushlightuserdata(L, lj);       /* key */
-    lua_pushvalue(L, t);                /* value = table */
-    lua_settable(L, LUA_REGISTRYINDEX);
+  
+  /* Get result table from registry */
+  lua_rawgeti(L, LUA_REGISTRYINDEX, result_ref);
+  if (!lua_istable(L, -1)) {
+    lua_pop(L, 1);
+    return luaL_error(L, "result table is invalid");
   }
-  lua_pop(L, 1); /* pop local table */
+  
+  /* Pack arguments into the result table */
+  int n = lua_gettop(L) - 1;  /* exclude the table itself */
+  int i;
+  for (i = 1; i <= n; i++) {
+    lua_pushvalue(L, i);
+    lua_rawseti(L, -2, i);  /* table[i] = arg[i] */
+  }
+  lua_pop(L, 1);  /* pop table */
+  
   /* Jump back to callec's protected runner using an error status so VM unwinds */
   luaD_longjump(L, lj, LUA_ERRRUN);
   return 0; /* unreachable */
 }
 
+typedef struct CallecData {
+  lua_longjmp *lj;
+  int result_ref;  /* registry reference for result table */
+} CallecData;
+
 static void callec_runner(lua_State *L, void *ud) {
-  lua_longjmp *lj = (lua_longjmp *)ud;
+  CallecData *data = (CallecData *)ud;
+  int i, nresults;
+  
   /* arg 1 must be a function */
   luaL_checktype(L, 1, LUA_TFUNCTION);
-  /* Mark this escape continuation as valid in registry */
-  /* Use lj+1 as key for validity flag to avoid collision with result table */
-  lua_pushlightuserdata(L, (void*)((char*)lj + 1));
-  lua_pushboolean(L, 1);
-  lua_rawset(L, LUA_REGISTRYINDEX);
-  /* push escape closure as single argument with 2 upvalues: lj and L */
-  lua_pushlightuserdata(L, lj);
+  
+  /* Create escape closure with 3 upvalues: lj, L, result_ref */
+  lua_pushlightuserdata(L, data->lj);
   lua_pushlightuserdata(L, L);
-  lua_pushcclosure(L, k_escape, 2); /* escape */
+  lua_pushinteger(L, data->result_ref);
+  lua_pushcclosure(L, k_escape, 3);
+  
   /* call func(escape) with multiple returns */
   lua_call(L, 1, LUA_MULTRET);
+  
+  /* Normal return: store results in table for consistency */
+  nresults = lua_gettop(L);
+  lua_rawgeti(L, LUA_REGISTRYINDEX, data->result_ref);
+  
+  /* Mark this as normal return by setting a flag */
+  lua_pushboolean(L, 1);
+  lua_rawseti(L, -2, 0);  /* table[0] = true (normal return marker) */
+  
+  /* Store results in table */
+  for (i = 1; i <= nresults; i++) {
+    lua_pushvalue(L, i);
+    lua_rawseti(L, -2, i);
+  }
+  lua_pop(L, 1);  /* pop table */
 }
 
 static int luaB_callec(lua_State *L) {
   lua_longjmp lj;
-  int base = lua_gettop(L);
-  TStatus st = luaD_runwithjump(L, &lj, callec_runner, &lj);
-  /* Invalidate the escape continuation */
-  lua_pushlightuserdata(L, (void*)((char*)&lj + 1));
-  lua_pushnil(L);
-  lua_rawset(L, LUA_REGISTRYINDEX);
-  /* After run: either normal return (st==LUA_OK) or escaped via longjump (st!=LUA_OK) */
-  /* Check if escaped: registry[lj] holds a table of results */
-  lua_pushlightuserdata(L, &lj);
-  lua_gettable(L, LUA_REGISTRYINDEX);
-  if (lua_istable(L, -1)) {
-    /* escape path: keep table, compute len, then move table just above base */
-    lua_Unsigned len = lua_rawlen(L, -1);
-    /* clear registry entry now */
-    lua_pushlightuserdata(L, &lj);
-    lua_pushnil(L);
-    lua_settable(L, LUA_REGISTRYINDEX);
-    /* move table to position base+1 and drop anything above */
-    lua_insert(L, base + 1);  /* table to base+1 */
-    lua_settop(L, base + 1);  /* stack: ... table */
-    {
-      lua_Integer i;
-      for (i = 1; i <= (lua_Integer)len; i++) {
-        lua_rawgeti(L, base + 1, i);
-      }
-    }
-    /* remove the table, leaving only the pushed values */
-    lua_remove(L, base + 1);
-    return (int)len;
-  } else {
-    /* no escape: pop lookup result */
+  CallecData data;
+  int result_ref;
+  TStatus st;
+  int is_normal_return;
+  lua_Unsigned len;
+  lua_Integer i;
+  int table_idx;
+  
+  /* Create result table and store in registry */
+  lua_newtable(L);
+  result_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+  
+  /* Setup data for runner */
+  data.lj = &lj;
+  data.result_ref = result_ref;
+  
+  /* Run with longjump protection */
+  st = luaD_runwithjump(L, &lj, callec_runner, &data);
+  
+  /* Get result table from registry */
+  lua_rawgeti(L, LUA_REGISTRYINDEX, result_ref);
+  
+  if (!lua_istable(L, -1)) {
+    /* Result table is invalid - this is a real error */
     lua_pop(L, 1);
+    luaL_unref(L, LUA_REGISTRYINDEX, result_ref);
+    
     if (st != LUA_OK) {
-      /* real error */
       return lua_error(L);
     }
-    /* normal return from function: results left on stack by lua_call */
-    return lua_gettop(L); /* stack now contains exactly the results */
+    return luaL_error(L, "callec: result table is invalid");
+  }
+  
+  /* Check if this is normal return (table[0] == true) or escape */
+  lua_rawgeti(L, -1, 0);
+  is_normal_return = lua_toboolean(L, -1);
+  lua_pop(L, 1);
+  
+  if (st != LUA_OK && !is_normal_return) {
+    /* Escape path: table has results from k_escape */
+    len = lua_rawlen(L, -1);
+    table_idx = lua_gettop(L);
+    
+    /* Unpack table contents onto stack */
+    for (i = 1; i <= (lua_Integer)len; i++) {
+      lua_rawgeti(L, table_idx, i);
+    }
+    
+    /* Remove table */
+    lua_remove(L, table_idx);
+    
+    /* Clean up */
+    luaL_unref(L, LUA_REGISTRYINDEX, result_ref);
+    
+    return (int)len;
+  } else if (st == LUA_OK && is_normal_return) {
+    /* Normal return path: table has results from callec_runner */
+    len = lua_rawlen(L, -1);
+    table_idx = lua_gettop(L);
+    
+    /* Unpack table contents onto stack */
+    for (i = 1; i <= (lua_Integer)len; i++) {
+      lua_rawgeti(L, table_idx, i);
+    }
+    
+    /* Remove table */
+    lua_remove(L, table_idx);
+    
+    /* Clean up */
+    luaL_unref(L, LUA_REGISTRYINDEX, result_ref);
+    
+    return (int)len;
+  } else {
+    /* Error condition */
+    lua_pop(L, 1);
+    luaL_unref(L, LUA_REGISTRYINDEX, result_ref);
+    return lua_error(L);
   }
 }
 
