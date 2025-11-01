@@ -1199,15 +1199,11 @@ void luaV_injectcontext (lua_State *L, lua_State *source) {
   ptrdiff_t stack_offset;
   CallInfo *src_ci;
   CallInfo *dst_ci;
-  CallInfo *call_ci;  /* The CI that called the continuation */
   int i, ci_count;
   
   fprintf(stderr, "[VM] luaV_injectcontext: injecting FULL context from %p to %p\n",
           (void*)source, (void*)L);
   fprintf(stderr, "[VM]   Source has %d CallInfos\n", source->nci);
-  
-  /* Save the continuation call site (we need to replace everything BELOW it) */
-  call_ci = L->ci;
   
   /* Phase 1: Stack injection - copy ENTIRE source stack */
   fprintf(stderr, "[VM]   copying %d stack slots\n", total_slots);
@@ -1215,8 +1211,8 @@ void luaV_injectcontext (lua_State *L, lua_State *source) {
   /* Ensure we have enough space */
   luaD_checkstack(L, total_slots + LUA_MINSTACK);
   
-  /* Calculate where to place the stack - at the base of current frame */
-  StkId dest_base = call_ci->func.p;
+  /* REPLACE the entire stack with continuation's stack (start from stack.p) */
+  StkId dest_base = L->stack.p;
   
   /* Copy entire stack from source */
   for (i = 0; i < total_slots; i++) {
@@ -1237,26 +1233,22 @@ void luaV_injectcontext (lua_State *L, lua_State *source) {
   
   fprintf(stderr, "[VM]   Restoring %d CallInfos\n", ci_count);
   
-  /* Pop current CI and replace with source's chain */
-  /* First, go back to the CI before call_ci (the caller of continuation invoke) */
-  if (call_ci->previous) {
-    L->ci = call_ci->previous;
-  } else {
-    L->ci = &L->base_ci;
-  }
-  
-  /* Now build the source's CallInfo chain */
+  /* REPLACE the entire CallInfo chain with continuation's chain
+  ** Start from base_ci to avoid accumulating CallInfos */
   src_ci = &source->base_ci;
-  dst_ci = L->ci;
+  dst_ci = &L->base_ci;
+  L->ci = dst_ci;
   
   for (i = 0; i < ci_count; i++) {
-    /* Allocate next CallInfo if needed */
-    if (dst_ci->next == NULL) {
-      dst_ci->next = luaE_extendCI(L);
+    /* For base_ci (i==0), use existing base_ci; otherwise allocate/reuse */
+    if (i > 0) {
+      if (dst_ci->next == NULL) {
+        dst_ci->next = luaE_extendCI(L);
+      }
+      dst_ci = dst_ci->next;
+      dst_ci->previous = L->ci;
+      L->ci = dst_ci;
     }
-    dst_ci = dst_ci->next;
-    dst_ci->previous = L->ci;
-    L->ci = dst_ci;
     
     /* Copy CallInfo with adjusted pointers */
     dst_ci->func.p = src_ci->func.p + stack_offset;
