@@ -64,6 +64,7 @@ static void setupThreadForResume (lua_State *thread, lua_State *L, CallInfo *sou
   StkId stack_top = L->top.p;
   int total_slots = cast_int(stack_top - stack_bottom);
   int i;
+  int ci_count;
   CallInfo *src_ci;
   CallInfo *dst_ci;
   ptrdiff_t stack_offset;
@@ -86,7 +87,7 @@ static void setupThreadForResume (lua_State *thread, lua_State *L, CallInfo *sou
   
   /* Now copy CallInfo chain from base_ci to source_ci */
   /* First, count how many CallInfo nodes we need */
-  int ci_count = 0;
+  ci_count = 0;
   for (src_ci = &L->base_ci; src_ci != NULL && src_ci != source_ci->next; src_ci = src_ci->next) {
     ci_count++;
   }
@@ -340,11 +341,16 @@ int luaCont_iscontinvoke (const TValue *func) {
 ** Helper: Setup upvalues for cloned closure
 ** SIMPLIFIED: Just share all upvalues with original
 ** This is safe and avoids complex memory management issues
+** NOTE: Currently unused - kept for reference
 */
+#if 0
 static void setupClonedClosureUpvalues(LClosure *clone_cl, LClosure *orig_cl) {
   int i;
-  int nups = clone_cl->nupvalues;
+  int nups;
   
+  UNUSED(clone_cl);
+  UNUSED(orig_cl);
+  nups = clone_cl->nupvalues;
   fprintf(stderr, "[CONT]   Sharing %d upvalues (simplified approach)\n", nups);
   
   for (i = 0; i < nups; i++) {
@@ -363,6 +369,7 @@ static void setupClonedClosureUpvalues(LClosure *clone_cl, LClosure *orig_cl) {
   ** but it's the safest approach and works for most use cases.
   ** For complete isolation, use global variables or tables */
 }
+#endif
 
 static lua_State *cloneThreadForInvoke(lua_State *L, lua_State *orig, int *ref_out) {
   lua_State *clone;
@@ -454,8 +461,10 @@ int luaCont_doinvoke (lua_State *L, StkId func, int nresults) {
   const Instruction *saved_pc;
   Instruction call_inst;
   int ra_offset;
-  StkId thread_dest;
+  TValue saved_args[MAXRESULTS];
+  StkId result_pos;
   
+  UNUSED(nresults);
   fprintf(stderr, "[CONT] luaCont_doinvoke: starting (Trampoline + Multi-shot)\n");
   
   /* Extract continuation from closure upvalue */
@@ -477,8 +486,7 @@ int luaCont_doinvoke (lua_State *L, StkId func, int nresults) {
   nargs = cast_int(L->top.p - (func + 1));
   fprintf(stderr, "[CONT]   %d arguments to continuation\n", nargs);
   
-  /* Save arguments BEFORE injection (they will be overwritten) */
-  TValue saved_args[MAXRESULTS];
+  /* Save continuation arguments (up to MAXRESULTS) */
   for (i = 0; i < nargs && i < MAXRESULTS; i++) {
     setobj(L, &saved_args[i], s2v(func + 1 + i));
   }
@@ -507,8 +515,8 @@ int luaCont_doinvoke (lua_State *L, StkId func, int nresults) {
   
   /* ⭐ STEP 3: Now copy arguments to the injected context
   ** Arguments go to the position specified by RA offset in the CALL instruction
-  ** IMPORTANT: Use the captured context's func.p, not the original */
-  StkId result_pos = L->ci->func.p + 1 + ra_offset;
+  ** IMPORTANT:  */
+  result_pos = L->ci->func.p + 1 + ra_offset;
   
   fprintf(stderr, "[CONT]   Placing %d args at result_pos=%p (func.p + 1 + %d)\n",
           nargs, (void*)result_pos, ra_offset);

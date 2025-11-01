@@ -1200,6 +1200,7 @@ void luaV_injectcontext (lua_State *L, lua_State *source) {
   CallInfo *src_ci;
   CallInfo *dst_ci;
   int i, ci_count;
+  StkId dest_base;
   
   fprintf(stderr, "[VM] luaV_injectcontext: injecting FULL context from %p to %p\n",
           (void*)source, (void*)L);
@@ -1212,7 +1213,7 @@ void luaV_injectcontext (lua_State *L, lua_State *source) {
   luaD_checkstack(L, total_slots + LUA_MINSTACK);
   
   /* REPLACE the entire stack with continuation's stack (start from stack.p) */
-  StkId dest_base = L->stack.p;
+  dest_base = L->stack.p;
   
   /* Copy entire stack from source */
   for (i = 0; i < total_slots; i++) {

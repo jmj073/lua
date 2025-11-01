@@ -178,6 +178,7 @@ void luaD_unsetjump (lua_State *L, lua_longjmp *lj) {
 
 l_noret luaD_longjump (lua_State *L, lua_longjmp *target, TStatus status) {
   target->status = status;
+  UNUSED(L);
   LUAI_THROW(L, target);
 }
 

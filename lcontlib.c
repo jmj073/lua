@@ -28,9 +28,15 @@ lua_CFunction luaCont_getcallfunc (void) {
 }
 
 static int k_escape(lua_State *L) {
-  lua_longjmp *lj = (lua_longjmp *)lua_touserdata(L, lua_upvalueindex(1));
-  lua_State *origin_L = (lua_State *)lua_touserdata(L, lua_upvalueindex(2));
-  int result_ref = (int)lua_tointeger(L, lua_upvalueindex(3));  /* registry ref for result table */
+  lua_longjmp *lj;
+  lua_State *origin_L;
+  int result_ref;
+  int n;
+  int i;
+  
+  lj = (lua_longjmp *)lua_touserdata(L, lua_upvalueindex(1));
+  origin_L = (lua_State *)lua_touserdata(L, lua_upvalueindex(2));
+  result_ref = (int)lua_tointeger(L, lua_upvalueindex(3));  /* registry ref for result table */
   
   /* Check if we're trying to escape across coroutine boundaries */
   if (L != origin_L) {
@@ -50,8 +56,7 @@ static int k_escape(lua_State *L) {
   }
   
   /* Pack arguments into the result table */
-  int n = lua_gettop(L) - 1;  /* exclude the table itself */
-  int i;
+  n = lua_gettop(L) - 1;  /* exclude the table itself */
   for (i = 1; i <= n; i++) {
     lua_pushvalue(L, i);
     lua_rawseti(L, -2, i);  /* table[i] = arg[i] */
@@ -234,6 +239,7 @@ int cont_call(lua_State *L) {
 static int luaB_callcc(lua_State *L) {
   Continuation *cont;
   int nresults;
+  lu_byte old_gcstp;
   
   /* Argument must be a function */
   luaL_checktype(L, 1, LUA_TFUNCTION);
@@ -252,7 +258,7 @@ static int luaB_callcc(lua_State *L) {
   ** Alternative: Stop GC during this critical section. */
   
   /* Disable GC temporarily to prevent collection during closure creation */
-  lu_byte old_gcstp = G(L)->gcstp;
+  old_gcstp = G(L)->gcstp;
   G(L)->gcstp = 1;  /* stop GC */
   
   /* Push continuation pointer as light userdata */
