@@ -419,13 +419,114 @@ static AstNode *parse_statement (lua_State *L, AstState *as) {
       return NULL;
     }
     case TK_LOCAL: {
-      as->ls->L->nCcalls--;
-      return parse_local_stmt(L, as);
+      /* Check if it's local function or local variable */
+      int next_token = luaX_lookahead(as->ls);
+      if (next_token == TK_FUNCTION) {
+        /* local fn name(params) { body } */
+        AstLocalFuncStmt *stmt;
+        AstFunction *func;
+        NameList *params = NULL;
+        TString *name;
+        
+        stmt = arena_alloc(L, as, sizeof(AstLocalFuncStmt));
+        stmt->header.kind = AST_LOCAL_FUNC_STMT;
+        stmt->header.line = as->ls->linenumber;
+        
+        luaX_next(as->ls);  /* skip 'local' */
+        luaX_next(as->ls);  /* skip 'fn' */
+        
+        name = ast_str_checkname(as->ls);
+        stmt->name = name;
+        
+        /* Parse function */
+        func = arena_alloc(L, as, sizeof(AstFunction));
+        func->header.kind = AST_FUNCTION;
+        func->header.line = as->ls->linenumber;
+        func->is_vararg = 0;
+        
+        ast_checknext(as->ls, '(');
+        
+        /* Parse parameters */
+        if (as->ls->t.token != ')') {
+          do {
+            if (as->ls->t.token == TK_DOTS) {
+              func->is_vararg = 1;
+              luaX_next(as->ls);
+              break;
+            } else {
+              NameList *param = arena_alloc(L, as, sizeof(NameList));
+              param->name = ast_str_checkname(as->ls);
+              param->next = params;
+              params = param;
+            }
+          } while (ast_testnext(as->ls, ','));
+        }
+        
+        ast_checknext(as->ls, ')');
+        func->params = reverse_namelist(params);
+        
+        /* Parse body */
+        ast_checknext(as->ls, '{');
+        func->body = parse_block(L, as);
+        
+        stmt->func = func;
+        as->ls->L->nCcalls--;
+        return (AstNode *)stmt;
+      } else {
+        as->ls->L->nCcalls--;
+        return parse_local_stmt(L, as);
+      }
     }
-    case TK_FUNCTION: {  /* TODO: implement */
-      luaX_next(as->ls);
+    case TK_FUNCTION: {
+      /* fn name(params) { body } */
+      AstFunctionStmt *stmt;
+      AstFunction *func;
+      NameList *params = NULL;
+      TString *name;
+      
+      stmt = arena_alloc(L, as, sizeof(AstFunctionStmt));
+      stmt->header.kind = AST_FUNCTION_STMT;
+      stmt->header.line = as->ls->linenumber;
+      
+      luaX_next(as->ls);  /* skip 'fn' */
+      
+      name = ast_str_checkname(as->ls);
+      stmt->name = name;
+      
+      /* Parse function */
+      func = arena_alloc(L, as, sizeof(AstFunction));
+      func->header.kind = AST_FUNCTION;
+      func->header.line = as->ls->linenumber;
+      func->is_vararg = 0;
+      
+      ast_checknext(as->ls, '(');
+      
+      /* Parse parameters */
+      if (as->ls->t.token != ')') {
+        do {
+          if (as->ls->t.token == TK_DOTS) {
+            func->is_vararg = 1;
+            luaX_next(as->ls);
+            break;
+          } else {
+            NameList *param = arena_alloc(L, as, sizeof(NameList));
+            param->name = ast_str_checkname(as->ls);
+            param->next = params;
+            params = param;
+          }
+        } while (ast_testnext(as->ls, ','));
+      }
+      
+      ast_checknext(as->ls, ')');
+      func->params = reverse_namelist(params);
+      
+      /* Parse body */
+      ast_checknext(as->ls, '{');
+      func->body = parse_block(L, as);
+      
+      stmt->func = func;
       as->ls->L->nCcalls--;
-      return NULL;  /* stub */
+      return (AstNode *)stmt;
     }
     case TK_DBCOLON: {
       as->ls->L->nCcalls--;

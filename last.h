@@ -41,7 +41,7 @@ typedef enum {
   AST_LOCAL_DECL,
   AST_ASSIGNMENT,
   AST_FUNCTION_STMT,
-  AST_LOCAL_FUNC
+  AST_LOCAL_FUNC_STMT
 } AstNodeKind;
 
 
@@ -198,6 +198,18 @@ typedef struct {
   NameList *vars;      /* list of variables to assign to */
   ExprList *values;    /* values to assign */
 } AstAssignment;
+
+typedef struct {
+  AstNode header;
+  TString *name;       /* function name */
+  AstFunction *func;   /* function definition */
+} AstFunctionStmt;
+
+typedef struct {
+  AstNode header;
+  TString *name;       /* function name */
+  AstFunction *func;   /* function definition */
+} AstLocalFuncStmt;
 
 
 /*

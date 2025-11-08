@@ -678,6 +678,32 @@ static void gen_statement (CodeGenState *cg, AstNode *node) {
     case AST_ASSIGNMENT:
       gen_assignment(cg, (AstAssignment *)node);
       break;
+    case AST_FUNCTION_STMT: {
+      /* fn name(params) { body } - global function */
+      AstFunctionStmt *stmt = (AstFunctionStmt *)node;
+      int func_reg = gen_function(cg, stmt->func, cg->freereg);
+      TValue k;
+      int kidx;
+      
+      /* Store in global */
+      setsvalue(cg->L, &k, stmt->name);
+      kidx = addk(cg, &k);
+      code_instruction(cg, CREATE_ABCk(OP_SETTABUP, 0, kidx, func_reg, 0), stmt->header.line);
+      cg->freereg = func_reg;  /* Reset */
+      break;
+    }
+    case AST_LOCAL_FUNC_STMT: {
+      /* local fn name(params) { body } */
+      AstLocalFuncStmt *stmt = (AstLocalFuncStmt *)node;
+      int func_reg;
+      
+      /* Register name first for recursion */
+      func_reg = add_local(cg, stmt->name);
+      
+      /* Generate function (can now reference itself) */
+      gen_function(cg, stmt->func, func_reg);
+      break;
+    }
     case AST_IF:
       gen_if(cg, (AstIf *)node);
       break;
