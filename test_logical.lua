@@ -1,0 +1,6 @@
+print(true and false)
+print(true or false)
+print(false and true)
+print(false or true)
+print(5 and 10)
+print(nil or 42)

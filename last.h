@@ -9,47 +9,39 @@
 
 #include "lobject.h"
 #include "lzio.h"
-
+#include "lcode.h"  /* For BinOpr and UnOpr enums */
 
 /*
-** AST Node Types - BNF에 맞게 분리
+** AST Node Types
 */
 typedef enum {
   /* Expressions */
-  AST_NIL,
+  AST_NIL = 0,
   AST_TRUE,
   AST_FALSE,
   AST_NUMERAL,
   AST_STRING,
-  AST_VARARG,
   AST_VAR,
+  AST_VARARG,
   AST_BINOP,
   AST_UNOP,
-  AST_FUNCTION,
-  AST_TABLE,
-  AST_INDEX,
   AST_CALL,
+  AST_TABLECTOR,
+  AST_INDEXING,
+  AST_FUNCTION,
   
   /* Statements */
-  AST_ASSIGNMENT,
-  AST_FUNCCALL_STMT,
-  AST_LABEL,
-  AST_BREAK,
-  AST_GOTO,
-  AST_DO,
-  AST_WHILE,
-  AST_REPEAT,
-  AST_IF,
-  AST_FOR_NUM,
-  AST_FOR_LIST,
-  AST_FUNCTION_STMT,
-  AST_LOCAL_DECL,
-  AST_LOCAL_FUNC,
-  AST_RETURN,
-  
-  /* Structural */
+  AST_CHUNK = 29,  /* Keep at 29 to match existing code */
   AST_BLOCK,
-  AST_CHUNK
+  AST_LABEL,
+  AST_GOTO,
+  AST_RETURN,
+  AST_FUNCCALL_STMT,
+  AST_IF,
+  AST_LOCAL_DECL,
+  AST_ASSIGNMENT,
+  AST_FUNCTION_STMT,
+  AST_LOCAL_FUNC
 } AstNodeKind;
 
 
@@ -79,6 +71,14 @@ typedef struct StmtList {
   struct StmtList *next;
 } StmtList;
 
+/*
+** Name List (linked list)
+*/
+typedef struct NameList {
+  TString *name;
+  struct NameList *next;
+} NameList;
+
 
 /*
 ** Expressions
@@ -100,14 +100,14 @@ typedef struct {
 
 typedef struct {
   AstNode header;
-  OpCode op;
+  BinOpr op;
   AstNode *left;
   AstNode *right;
 } AstBinOp;
 
 typedef struct {
   AstNode header;
-  OpCode op;
+  UnOpr op;
   AstNode *operand;
 } AstUnOp;
 
@@ -116,6 +116,36 @@ typedef struct {
   AstNode *func;       /* function expression */
   ExprList *args;      /* argument list */
 } AstCall;
+
+typedef enum {
+  FIELD_LIST,    /* array element: expr */
+  FIELD_REC      /* record element: key = value */
+} FieldKind;
+
+typedef struct TableField {
+  FieldKind kind;
+  AstNode *key;        /* NULL for list field */
+  AstNode *value;
+  struct TableField *next;
+} TableField;
+
+typedef struct {
+  AstNode header;
+  TableField *fields;
+} AstTableCtor;
+
+typedef struct {
+  AstNode header;
+  AstNode *table;      /* table expression */
+  AstNode *index;      /* index expression */
+} AstIndexing;
+
+typedef struct {
+  AstNode header;
+  NameList *params;    /* parameter names */
+  AstNode *body;       /* function body (block) */
+  int is_vararg;       /* 1 if function has ... */
+} AstFunction;
 
 
 /*
@@ -145,6 +175,29 @@ typedef struct {
   AstNode header;
   AstNode *call;  /* AstCall node */
 } AstFuncCallStmt;
+
+typedef struct IfClause {
+  AstNode *condition;  /* condition expression (NULL for else) */
+  AstNode *body;       /* block to execute */
+  struct IfClause *next;
+} IfClause;
+
+typedef struct {
+  AstNode header;
+  IfClause *clauses;   /* if/elseif/else clauses */
+} AstIf;
+
+typedef struct {
+  AstNode header;
+  NameList *names;     /* list of variable names */
+  ExprList *values;    /* optional initialization values */
+} AstLocalDecl;
+
+typedef struct {
+  AstNode header;
+  NameList *vars;      /* list of variables to assign to */
+  ExprList *values;    /* values to assign */
+} AstAssignment;
 
 
 /*
