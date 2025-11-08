@@ -111,6 +111,12 @@ typedef struct {
   AstNode *operand;
 } AstUnOp;
 
+typedef struct {
+  AstNode header;
+  AstNode *func;       /* function expression */
+  ExprList *args;      /* argument list */
+} AstCall;
+
 
 /*
 ** Statements
@@ -134,6 +140,11 @@ typedef struct {
   AstNode header;
   ExprList *exprs;
 } AstReturn;
+
+typedef struct {
+  AstNode header;
+  AstNode *call;  /* AstCall node */
+} AstFuncCallStmt;
 
 
 /*

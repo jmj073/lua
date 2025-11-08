@@ -38,7 +38,7 @@ static void *arena_alloc (lua_State *L, AstState *as, size_t size) {
   void *ptr;
   if (oldsize + size > luaZ_sizebuffer(b)) {
     size_t newsize = luaZ_sizebuffer(b);
-    if (newsize == 0) newsize = 32;
+    if (newsize == 0) newsize = 4096;  /* Start with 4KB */
     while (newsize < oldsize + size)
       newsize *= 2;
     luaZ_resizebuffer(L, b, newsize);
@@ -308,10 +308,20 @@ static AstNode *parse_statement (lua_State *L, AstState *as) {
       return parse_return_stmt(L, as);
     }
     default: {
-      /* TODO: expression statement or assignment */
+      /* Try parsing as expression statement (e.g., function call) */
+      AstNode *expr = parse_expr(L, as);
       as->ls->L->nCcalls--;
-      (void)line;
-      return NULL;  /* stub */
+      /* For now, only function calls are allowed as statements */
+      if (expr && expr->kind == AST_CALL) {
+        AstFuncCallStmt *stmt = arena_alloc(L, as, sizeof(AstFuncCallStmt));
+        stmt->header.kind = AST_FUNCCALL_STMT;
+        stmt->header.line = expr->line;
+        stmt->call = expr;
+        return (AstNode *)stmt;
+      }
+      /* TODO: handle assignments */
+      ast_testnext(as->ls, ';');  /* skip optional semicolon */
+      return NULL;
     }
   }
 }
@@ -375,8 +385,51 @@ static AstNode *parse_simple_expr (lua_State *L, AstState *as) {
       luaX_next(ls);
       return node;
     }
+    case TK_NAME: {
+      AstVar *var = arena_alloc(L, as, sizeof(AstVar));
+      var->header.kind = AST_VAR;
+      var->header.line = ls->linenumber;
+      var->name = ls->t.seminfo.ts;
+      luaX_next(ls);
+      
+      /* Check if it's a function call */
+      if (ls->t.token == '(') {
+        AstCall *call = arena_alloc(L, as, sizeof(AstCall));
+        ExprList *args = NULL;
+        call->header.kind = AST_CALL;
+        call->header.line = var->header.line;
+        call->func = (AstNode *)var;
+        
+        luaX_next(ls);  /* skip '(' */
+        
+        /* Parse arguments */
+        if (ls->t.token != ')') {
+          AstNode *arg = parse_expr(L, as);
+          ExprList *node = arena_alloc(L, as, sizeof(ExprList));
+          node->expr = arg;
+          node->next = args;
+          args = node;
+          
+          while (ast_testnext(ls, ',')) {
+            arg = parse_expr(L, as);
+            node = arena_alloc(L, as, sizeof(ExprList));
+            node->expr = arg;
+            node->next = args;
+            args = node;
+          }
+          
+          call->args = reverse_exprlist(args);
+        } else {
+          call->args = NULL;
+        }
+        
+        ast_checknext(ls, ')');
+        return (AstNode *)call;
+      }
+      
+      return (AstNode *)var;
+    }
     default: {
-      /* TODO: variables, function calls, etc. */
       luaX_syntaxerror(ls, "unexpected symbol in expression");
       return NULL;
     }
@@ -404,6 +457,9 @@ AST *luaA_parser (lua_State *L, ZIO *z,
   AstNode *root;
   
   /* lexer 초기화 (이미 초기화된 버퍼 사용) */
+  ls.h = luaH_new(L);  /* create table for scanner */
+  sethvalue2s(L, L->top.p, ls.h);  /* anchor it */
+  luaD_inctop(L);
   ls.buff = lex_buff;  /* Must set buff BEFORE luaX_setinput */
   luaX_setinput(L, &ls, z, luaS_new(L, name), firstchar);
   
@@ -416,10 +472,13 @@ AST *luaA_parser (lua_State *L, ZIO *z,
   /* 파싱 수행 (에러 시 longjmp, 정리는 luaD_protectedparser가 함) */
   root = parse_chunk(L, &as);
   
-  /* AST 구조체 생성 */
+  /* AST 구조체 생성 및 anchor */
   ast = luaM_new(L, AST);
   ast->arena = ast_arena;  /* 포인터 참조 (소유 안 함!) */
   ast->root = root;
+  
+  /* Push AST root as userdata to anchor it (prevent GC) */
+  lua_pushlightuserdata(L, ast);
   
   return ast;
 }

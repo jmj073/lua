@@ -10,6 +10,7 @@
 #include "lprefix.h"
 
 #include <limits.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "lua.h"
@@ -39,6 +40,7 @@ typedef struct CodeGenState {
   Proto *f;              /* current function header */
   lua_State *L;
   int pc;                /* next position to code */
+  int nk;                /* number of elements in 'k' */
   int freereg;           /* first free register */
 } CodeGenState;
 
@@ -56,16 +58,21 @@ static int gen_expr (CodeGenState *cg, AstNode *node);
 */
 static int addk (CodeGenState *cg, TValue *v) {
   Proto *f = cg->f;
+  int oldsize = f->sizek;
+  int k = cg->nk;
   int i;
   /* Check if constant already exists */
-  for (i = 0; i < f->sizek; i++) {
+  for (i = 0; i < cg->nk; i++) {
     if (luaV_rawequalobj(&f->k[i], v))
       return i;
   }
   /* Add new constant */
-  luaM_growvector(cg->L, f->k, f->sizek, f->sizek, TValue, MAXARG_Ax, "constants");
-  setobj(cg->L, &f->k[f->sizek], v);
-  return f->sizek++;
+  luaM_growvector(cg->L, f->k, k, f->sizek, TValue, MAXARG_Ax, "constants");
+  while (oldsize < f->sizek)
+    setnilvalue(&f->k[oldsize++]);
+  setobj(cg->L, &f->k[k], v);
+  cg->nk++;
+  return k;
 }
 
 
@@ -103,11 +110,11 @@ static int gen_expr (CodeGenState *cg, AstNode *node) {
       break;
     }
     case AST_TRUE: {
-      code_instruction(cg, CREATE_Ax(OP_LOADTRUE, reg), node->line);
+      code_instruction(cg, CREATE_ABCk(OP_LOADTRUE, reg, 0, 0, 0), node->line);
       break;
     }
     case AST_FALSE: {
-      code_instruction(cg, CREATE_Ax(OP_LOADFALSE, reg), node->line);
+      code_instruction(cg, CREATE_ABCk(OP_LOADFALSE, reg, 0, 0, 0), node->line);
       break;
     }
     case AST_NUMERAL: {
@@ -128,6 +135,35 @@ static int gen_expr (CodeGenState *cg, AstNode *node) {
       kidx = addk(cg, &k);
       code_instruction(cg, CREATE_ABx(OP_LOADK, reg, kidx), node->line);
       break;
+    }
+    case AST_VAR: {
+      AstVar *var = (AstVar *)node;
+      /* Global variable: get from _ENV (upvalue 0) */
+      setsvalue(cg->L, &k, var->name);
+      kidx = addk(cg, &k);
+      /* OP_GETTABUP: A B C - R[A] := UpValue[B][K[C]:string] */
+      /* k=0 means C is a register; but for shortstring, C is always constant index */
+      code_instruction(cg, CREATE_ABCk(OP_GETTABUP, reg, 0, kidx, 0), node->line);
+      break;
+    }
+    case AST_CALL: {
+      AstCall *call = (AstCall *)node;
+      int func_reg = gen_expr(cg, call->func);
+      ExprList *arg;
+      int nargs = 0;
+      int base = func_reg;
+      
+      /* Generate code for arguments */
+      for (arg = call->args; arg != NULL; arg = arg->next) {
+        gen_expr(cg, arg->expr);
+        nargs++;
+      }
+      
+      /* OP_CALL: A B C - R[A], ... ,R[A+C-2] := R[A](R[A+1], ... ,R[A+B-1]) */
+      code_instruction(cg, CREATE_ABCk(OP_CALL, base, nargs + 1, 2, 0), node->line);
+      /* Result is in base register */
+      cg->freereg = base + 1;
+      return base;
     }
     default:
       luaG_runerror(cg->L, "codegen: unsupported expression kind %d", node->kind);
@@ -167,6 +203,25 @@ static void gen_statement (CodeGenState *cg, AstNode *node) {
   switch (node->kind) {
     case AST_RETURN: {
       gen_return(cg, (AstReturn *)node);
+      break;
+    }
+    case AST_FUNCCALL_STMT: {
+      AstFuncCallStmt *stmt = (AstFuncCallStmt *)node;
+      AstCall *call = (AstCall *)stmt->call;
+      int func_reg = gen_expr(cg, call->func);
+      ExprList *arg;
+      int nargs = 0;
+      int base = func_reg;
+      
+      /* Generate code for arguments */
+      for (arg = call->args; arg != NULL; arg = arg->next) {
+        gen_expr(cg, arg->expr);
+        nargs++;
+      }
+      
+      /* OP_CALL with C=1 discards all results */
+      code_instruction(cg, CREATE_ABCk(OP_CALL, base, nargs + 1, 1, 0), stmt->header.line);
+      cg->freereg = base;  /* Reset to before call */
       break;
     }
     case AST_LABEL:
@@ -225,15 +280,29 @@ LClosure *luaY_generate (lua_State *L, AST *ast,
   f->source = luaS_new(L, name);
   luaC_objbarrier(L, f, f->source);
   
+  /* Setup _ENV upvalue */
+  f->sizeupvalues = 1;
+  f->upvalues = luaM_newvector(L, 1, Upvaldesc);
+  f->upvalues[0].instack = 1;
+  f->upvalues[0].idx = 0;
+  f->upvalues[0].kind = VDKREG;
+  f->upvalues[0].name = luaS_newliteral(L, "_ENV");
+  luaC_objbarrier(L, f, f->upvalues[0].name);
+  
   /* Initialize code generation state */
   cg.f = f;
   cg.L = L;
   cg.pc = 0;
+  cg.nk = 0;
   cg.freereg = 0;
   
   /* Set function properties */
   f->numparams = 0;
+  f->flag = PF_ISVARARG;  /* Main function is always vararg */
   f->maxstacksize = 2;  /* Minimum stack size */
+  
+  /* Emit VARARGPREP for vararg functions */
+  code_instruction(&cg, CREATE_ABCk(OP_VARARGPREP, 0, 0, 0, 0), 0);
   
   /* Generate code from AST */
   gen_chunk(&cg, ast->root);

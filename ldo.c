@@ -1156,9 +1156,14 @@ static void f_parser (lua_State *L, void *ud) {
     checkmode(L, mode, "text");
 #ifdef LUA_USE_AST
     /* AST-based parser */
-    AST *ast = luaA_parser(L, p->z, &p->buff, &p->ast_arena, p->name, c);
-    cl = luaY_generate(L, ast, &p->dyd, p->name);
-    luaM_free(L, ast);  /* AST 구조체만 해제 (아레나는 SParser가 관리) */
+    {
+      AST *ast = luaA_parser(L, p->z, &p->buff, &p->ast_arena, p->name, c);
+      /* AST is anchored on stack by luaA_parser, pop it */
+      L->top.p--;
+      /* luaY_generate will push the closure onto the stack */
+      cl = luaY_generate(L, ast, &p->dyd, p->name);
+      luaM_free(L, ast);  /* AST 구조체만 해제 (아레나는 SParser가 관리) */
+    }
 #else
     /* Direct bytecode generation (기존) */
     cl = luaY_parser(L, p->z, &p->buff, &p->dyd, p->name, c);
