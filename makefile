@@ -90,7 +90,7 @@ RM= rm -f
 LIBS = -lm
 
 CORE_T=	liblua.a
-CORE_O=	lapi.o lcode.o lcont.o lctype.o ldebug.o ldo.o ldump.o lfunc.o lgc.o llex.o \
+CORE_O=	lapi.o last.o lcode.o lcodegen.o lcont.o lctype.o ldebug.o ldo.o ldump.o lfunc.o lgc.o llex.o \
 	lmem.o lobject.o lopcodes.o lparser.o lstate.o lstring.o ltable.o \
 	ltm.o lundump.o lvm.o lzio.o ltests.o
 AUX_O=	lauxlib.o

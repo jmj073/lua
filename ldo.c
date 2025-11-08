@@ -33,6 +33,11 @@
 #include "lvm.h"
 #include "lzio.h"
 
+#ifdef LUA_USE_AST
+#include "last.h"
+#include "lcodegen.h"
+#endif
+
 
 
 #define errorstatus(s)	((s) > LUA_YIELD)
@@ -1117,6 +1122,9 @@ struct SParser {  /* data to 'f_parser' */
   ZIO *z;
   Mbuffer buff;  /* dynamic structure used by the scanner */
   Dyndata dyd;  /* dynamic structures used by the parser */
+#ifdef LUA_USE_AST
+  Mbuffer ast_arena;  /* AST memory arena */
+#endif
   const char *mode;
   const char *name;
 };
@@ -1146,7 +1154,15 @@ static void f_parser (lua_State *L, void *ud) {
   }
   else {
     checkmode(L, mode, "text");
+#ifdef LUA_USE_AST
+    /* AST-based parser */
+    AST *ast = luaA_parser(L, p->z, &p->buff, &p->ast_arena, p->name, c);
+    cl = luaY_generate(L, ast, &p->dyd, p->name);
+    luaM_free(L, ast);  /* AST 구조체만 해제 (아레나는 SParser가 관리) */
+#else
+    /* Direct bytecode generation (기존) */
     cl = luaY_parser(L, p->z, &p->buff, &p->dyd, p->name, c);
+#endif
   }
   lua_assert(cl->nupvalues == cl->p->sizeupvalues);
   luaF_initupvals(L, cl);
@@ -1163,8 +1179,15 @@ TStatus luaD_protectedparser (lua_State *L, ZIO *z, const char *name,
   p.dyd.gt.arr = NULL; p.dyd.gt.size = 0;
   p.dyd.label.arr = NULL; p.dyd.label.size = 0;
   luaZ_initbuffer(L, &p.buff);
+#ifdef LUA_USE_AST
+  luaZ_initbuffer(L, &p.ast_arena);
+  p.ast_arena.n = 0;  /* luaZ_initbuffer doesn't init n */
+#endif
   status = luaD_pcall(L, f_parser, &p, savestack(L, L->top.p), L->errfunc);
   luaZ_freebuffer(L, &p.buff);
+#ifdef LUA_USE_AST
+  luaZ_freebuffer(L, &p.ast_arena);
+#endif
   luaM_freearray(L, p.dyd.actvar.arr, cast_sizet(p.dyd.actvar.size));
   luaM_freearray(L, p.dyd.gt.arr, cast_sizet(p.dyd.gt.size));
   luaM_freearray(L, p.dyd.label.arr, cast_sizet(p.dyd.label.size));

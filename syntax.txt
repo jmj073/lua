@@ -46,7 +46,7 @@
 
 	parlist ::= namelist [‘,’ ‘...’] | ‘...’
 
-	tableconstructor ::= ‘{’ [fieldlist] ‘}’
+	tableconstructor ::= ‘{|’ [fieldlist] ‘|}’
 
 	fieldlist ::= field {fieldsep field} [fieldsep]
 
